@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     DUCKDNS_TOKEN: str | None = None
     DUCKDNS_DOMAIN: str | None = None          # just subdomain, e.g. "yourname"
     DUCKDNS_UPDATE_INTERVAL: int = 300         # seconds between auto IP updates
+    # Comma-separated host paths to scan for git repos (on the WSL host, via SSH)
+    # e.g. "/home/user,/home/user/bots,/mnt/d/code"
+    # Leave blank to only scan the container's data/workspaces folder
+    GIT_SCAN_PATHS: str | None = None
 
     class Config:
         env_file = ".env"

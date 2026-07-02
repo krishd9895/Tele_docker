@@ -186,7 +186,8 @@ async def _compose_project_keyboard(action: str):
 
     lines = [f"🐳 <b>Select a project to <code>{action}</code>:</b>\n"]
     for i, p in enumerate(projects, 1):
-        lines.append(f"{i}. <code>{p['name']}</code>  —  <code>{p['manifest']}</code>")
+        loc = "🖥️ host" if p.get("location") == "host" else "🐳 container"
+        lines.append(f"{i}. <code>{p['name']}</code>  —  <code>{p['manifest']}</code>  <i>({loc})</i>")
         lines.append(f"   📂 <code>{p['path']}</code>\n")
 
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)

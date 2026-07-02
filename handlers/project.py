@@ -210,7 +210,8 @@ async def cmd_gitpull(message: Message):
 
     lines = ["🔄 <b>Select a repo to pull:</b>\n"]
     for i, repo in enumerate(repos, 1):
-        lines.append(f"{i}. <code>{repo['name']}</code>")
+        loc = "🖥️ host" if repo.get("location") == "host" else "🐳 container"
+        lines.append(f"{i}. <code>{repo['name']}</code>  <i>({loc})</i>")
         if repo["remote"]:
             lines.append(f"   🔗 {repo['remote']}")
         lines.append(f"   📂 <code>{repo['path']}</code>\n")

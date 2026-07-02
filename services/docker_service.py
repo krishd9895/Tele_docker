@@ -1,8 +1,34 @@
 import docker
 import asyncio
+import os
+import paramiko
 from pathlib import Path
 from typing import AsyncGenerator
 import logging
+
+logger = logging.getLogger(__name__)
+
+COMPOSE_FILES = ["docker-compose.yml", "docker-compose.yaml", "compose.yaml", "compose.yml"]
+
+
+def _ssh_exec(command: str, timeout: int = 120) -> tuple[int, str]:
+    """Run a command on the WSL host via SSH."""
+    ssh_user = os.getenv("HOST_SSH_USER")
+    ssh_pass = os.getenv("HOST_SSH_PASSWORD")
+    if not ssh_user or not ssh_pass:
+        return -1, "HOST_SSH_USER or HOST_SSH_PASSWORD not configured"
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        ssh.connect("127.0.0.1", username=ssh_user, password=ssh_pass, timeout=15)
+        _, stdout, stderr = ssh.exec_command(command, timeout=timeout)
+        exit_code = stdout.channel.recv_exit_status()
+        output = stdout.read().decode(errors="ignore") + stderr.read().decode(errors="ignore")
+        return exit_code, output.strip()
+    except Exception as e:
+        return -1, str(e)
+    finally:
+        ssh.close()
 
 class DockerOrchestrationEngine:
     def __init__(self):
@@ -78,20 +104,81 @@ class DockerOrchestrationEngine:
                 raise ex
             raise RuntimeError(f"Orchestration sequence exception crashed: {ex}")
 
-    async def compose_up(self, project_path: str, manifest_name: str = None) -> tuple[bool, str]:
-        """Run docker compose up -d in the given path."""
-        path = Path(project_path)
-        if not path.exists():
-            return False, f"Path not found: <code>{project_path}</code>"
+    async def list_compose_projects(self, workspace_root: str = "data/workspaces") -> list[dict]:
+        """
+        Scan for compose projects from two sources:
+        1. Container's data/workspaces
+        2. GIT_SCAN_PATHS on the WSL host via SSH (same setting as gitpull)
+        """
+        projects = []
 
-        # Auto-detect manifest if not specified
+        # ── 1. Container-local workspace ──────────────────────────────────
+        root = Path(workspace_root)
+        if root.exists():
+            for entry in sorted(root.iterdir()):
+                if entry.is_dir():
+                    for cf in COMPOSE_FILES:
+                        if (entry / cf).exists():
+                            projects.append({
+                                "name":     entry.name,
+                                "path":     str(entry),
+                                "manifest": cf,
+                                "location": "container",
+                            })
+                            break
+
+        # ── 2. Host paths via SSH ──────────────────────────────────────────
+        from config.settings import runtime_settings
+        scan_paths_raw = runtime_settings.GIT_SCAN_PATHS
+        if scan_paths_raw:
+            for scan_path in [p.strip() for p in scan_paths_raw.split(",") if p.strip()]:
+                host_projects = await self._list_host_compose_projects(scan_path)
+                projects.extend(host_projects)
+
+        return projects
+
+    async def _list_host_compose_projects(self, scan_path: str) -> list[dict]:
+        """Find folders containing a compose file up to 2 levels deep on the host."""
+        # Build a find command that looks for any compose filename
+        names = " -o ".join(f'-name "{cf}"' for cf in COMPOSE_FILES)
+        cmd = f'find "{scan_path}" -maxdepth 2 \\( {names} \\) -type f 2>/dev/null'
+        code, output = await asyncio.to_thread(_ssh_exec, cmd)
+        if code != 0 or not output.strip():
+            return []
+
+        projects = []
+        seen = set()
+        for compose_file_path in output.strip().splitlines():
+            compose_file_path = compose_file_path.strip()
+            folder = compose_file_path.rsplit("/", 1)[0]
+            manifest = compose_file_path.rsplit("/", 1)[1]
+            if folder in seen:
+                continue
+            seen.add(folder)
+            name = folder.rstrip("/").split("/")[-1]
+            projects.append({
+                "name":     name,
+                "path":     folder,
+                "manifest": manifest,
+                "location": "host",
+            })
+        return projects
+
+    async def compose_up(self, project_path: str, manifest_name: str = None) -> tuple[bool, str]:
+        """Run docker compose up -d. Routes to host via SSH if path not in container."""
+        path = Path(project_path)
+
+        if not path.exists():
+            # Path not in container — run on host
+            return await self._compose_cmd_on_host(project_path, "up -d", manifest_name)
+
         if not manifest_name:
-            for candidate in ["docker-compose.yml", "docker-compose.yaml", "compose.yaml", "compose.yml"]:
-                if (path / candidate).exists():
-                    manifest_name = candidate
+            for cf in COMPOSE_FILES:
+                if (path / cf).exists():
+                    manifest_name = cf
                     break
         if not manifest_name:
-            return False, "No <code>docker-compose.yml</code> / <code>compose.yaml</code> found in that directory."
+            return False, "No compose file found in that directory."
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -111,18 +198,19 @@ class DockerOrchestrationEngine:
             return False, str(e)
 
     async def compose_down(self, project_path: str, manifest_name: str = None) -> tuple[bool, str]:
-        """Run docker compose down in the given path."""
+        """Run docker compose down. Routes to host via SSH if path not in container."""
         path = Path(project_path)
+
         if not path.exists():
-            return False, f"Path not found: <code>{project_path}</code>"
+            return await self._compose_cmd_on_host(project_path, "down", manifest_name)
 
         if not manifest_name:
-            for candidate in ["docker-compose.yml", "docker-compose.yaml", "compose.yaml", "compose.yml"]:
-                if (path / candidate).exists():
-                    manifest_name = candidate
+            for cf in COMPOSE_FILES:
+                if (path / cf).exists():
+                    manifest_name = cf
                     break
         if not manifest_name:
-            return False, "No <code>docker-compose.yml</code> / <code>compose.yaml</code> found in that directory."
+            return False, "No compose file found in that directory."
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -141,20 +229,28 @@ class DockerOrchestrationEngine:
         except Exception as e:
             return False, str(e)
 
-    async def list_compose_projects(self, workspace_root: str = "data/workspaces") -> list[dict]:
-        """Scan workspace for directories that contain a compose file."""
-        root = Path(workspace_root)
-        projects = []
-        if not root.exists():
-            return projects
-        compose_files = ["docker-compose.yml", "docker-compose.yaml", "compose.yaml", "compose.yml"]
-        for entry in sorted(root.iterdir()):
-            if entry.is_dir():
-                for cf in compose_files:
-                    if (entry / cf).exists():
-                        projects.append({"name": entry.name, "path": str(entry), "manifest": cf})
-                        break
-        return projects
+    async def _compose_cmd_on_host(
+        self, project_path: str, sub_cmd: str, manifest_name: str = None
+    ) -> tuple[bool, str]:
+        """Run `docker compose <sub_cmd>` on the WSL host via SSH."""
+        # Auto-detect manifest on host if not given
+        if not manifest_name:
+            for cf in COMPOSE_FILES:
+                check_cmd = f'test -f "{project_path}/{cf}" && echo "{cf}"'
+                code, out = await asyncio.to_thread(_ssh_exec, check_cmd)
+                if code == 0 and out.strip():
+                    manifest_name = out.strip()
+                    break
+        if not manifest_name:
+            return False, f"No compose file found in <code>{project_path}</code> on the host."
+
+        ssh_timeout = 320 if "up" in sub_cmd else 130
+        cmd = f'cd "{project_path}" && docker compose -f "{manifest_name}" {sub_cmd} 2>&1'
+        code, output = await asyncio.to_thread(_ssh_exec, cmd, timeout=ssh_timeout)
+        output = output.strip() or "(no output)"
+        if code == 0:
+            return True, output
+        return False, output
 
 
 docker_engine = DockerOrchestrationEngine()
