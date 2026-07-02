@@ -1,0 +1,56 @@
+# ── Secrets & environment ────────────────────────────────────────────────────
+.env
+.env.*
+*.env
+
+# ── Runtime data (mounted as volume at runtime) ───────────────────────────────
+data/
+
+# ── Git ───────────────────────────────────────────────────────────────────────
+.git/
+.gitignore
+.gitattributes
+
+# ── Python cache & bytecode ───────────────────────────────────────────────────
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── IDE & editor files ────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Test & coverage ───────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+tests/
+test_*.py
+
+# ── Docker files (not needed inside the image) ────────────────────────────────
+docker-compose.yml
+docker-compose*.yml
+.dockerignore
+
+# ── Docs & misc ───────────────────────────────────────────────────────────────
+README*
+*.md
+LICENSE

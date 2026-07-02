@@ -1,0 +1,60 @@
+networks:
+  bot-net:
+    driver: bridge
+
+services:
+  tg-manager-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tg_manager_bot
+    restart: always
+    network_mode: host
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./data:/app/data
+      # zrok binary — adjust source path to where zrok is installed on your WSL host
+      - /usr/local/bin/zrok:/usr/local/bin/zrok:ro
+      # zrok account enrollment (~/.zrok) so the container uses your enrolled identity
+      - ${HOME}/.zrok:/root/.zrok:ro
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - ALLOWED_USER_ID=${ALLOWED_USER_ID}
+      - SECRET_ADMIN_PASSWORD=${SECRET_ADMIN_PASSWORD}
+      - MONGO_URI=${MONGO_URI}
+      - TOTP_SECRET=${TOTP_SECRET}
+      - HOST_SSH_USER=${HOST_SSH_USER}
+      - HOST_SSH_PASSWORD=${HOST_SSH_PASSWORD}
+      - ZROK_BINARY=${ZROK_BINARY:-zrok}
+      - DUCKDNS_TOKEN=${DUCKDNS_TOKEN}
+      - DUCKDNS_DOMAIN=${DUCKDNS_DOMAIN}
+      - DUCKDNS_UPDATE_INTERVAL=${DUCKDNS_UPDATE_INTERVAL:-300}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os; exit(0) if os.path.exists('/app/data/healthy') else exit(1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  tg-rescue-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile.rescue
+    container_name: tg_rescue_bot
+    restart: always
+    network_mode: host
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - TELEGRAM_BOT_TOKEN=${RESCUE_BOT_TOKEN}
+      - ALLOWED_USER_ID=${ALLOWED_USER_ID}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"

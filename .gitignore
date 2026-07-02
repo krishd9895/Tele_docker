@@ -1,0 +1,43 @@
+# ── Secrets & environment ────────────────────────────────────────────────────
+.env
+.env.*
+*.env
+# .env.example is intentionally NOT ignored — it's the safe template
+
+# ── Runtime data ─────────────────────────────────────────────────────────────
+data/
+
+# ── Python cache & bytecode ───────────────────────────────────────────────────
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Test & coverage ───────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ── IDE & editor files ────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── Docker build artifacts ────────────────────────────────────────────────────
+*.tar

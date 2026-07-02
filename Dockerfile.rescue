@@ -1,0 +1,8 @@
+FROM python:3.12-alpine
+WORKDIR /rescue
+# setuptools adds distutils back into modern Python 3.12 environments
+RUN pip install --no-cache-dir aiogram docker setuptools
+COPY services/docker_service.py ./services/
+COPY utils/logger.py ./utils/
+COPY rescue_main.py ./main.py
+CMD ["python", "main.py"]
