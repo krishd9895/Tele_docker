@@ -140,80 +140,55 @@ Both commands show the full compose output in the reply
     (
         "zrok",
         "🌐 Zrok Tunnels",
-        """🌐 <b>Zrok Tunnel Management</b>
+        """🌐 <b>Zrok2 Tunnel Management</b>
 
-Expose any local port to the internet as a public HTTPS URL.
-Runs on your <b>self-hosted</b> zrok instance — no zrok.io account needed.
+Expose any local port as a public HTTPS URL.
+Uses your self-hosted <b>zrok2</b> instance running as
+systemd services on WSL Ubuntu.
 All tunnel commands <b>require 2FA</b>.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
-<b>Getting your token (self-hosted)</b>
+<b>Prerequisites (one-time server setup)</b>
 
-Your token comes from YOUR server, not any website.
-Run this once on your server terminal:
+zrok2 runs as Linux systemd services — not Docker.
+Install on your WSL host:
+<code>sudo apt install zrok2 zrok2-controller zrok2-frontend</code>
 
-<code>docker compose exec zrok-controller \
-  zrok admin create account \
-  you@yourdomain.com yourpassword</code>
+Bootstrap (generates admin token):
+<code>export ZROK2_ADMIN_TOKEN="$(head -c24 /dev/urandom | base64 -w0)"
+sudo -E /usr/share/zrok/nfpm/zrok2-bootstrap.bash</code>
 
-Find the line: <code>accountToken: &lt;string&gt;</code>
-Copy that value and add it to <code>.env</code>:
-<code>ZROK_PRIVATE_TOKEN=that_string_here</code>
-
-Once set, the bot enrolls zrok automatically on every start.
-
-━━━━━━━━━━━━━━━━━━━━━━━━
-<b>/zrok_install_local</b>  ← if auto-install fails
-No internet on WSL? Install manually:
-
-1. On your Windows PC, download:
-   <code>zrok_x.x.x_linux_amd64.tar.gz</code>
-   from github.com/openziti/zrok/releases
-
-2. Send /zrok_install_local to the bot
-
-3. Send the .tar.gz file to this chat
-
-Bot uploads it to WSL via SFTP, extracts it,
-and installs the binary — fully automatic.
+Save the <code>ZROK2_ADMIN_TOKEN</code> value into .env:
+<code>ZROK_PRIVATE_TOKEN=that_value</code>
+<code>ZROK_API_ENDPOINT=http://127.0.0.1:18080</code>
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
-<b>/zrok_setup</b>
-Opens a button panel — no PC needed after install.
-
-• <b>🔍 Check Status</b> — installed? enrolled?
-• <b>📥 Install zrok</b> — tries self-hosted download first,
-  falls back to official script
-• <b>🔑 Enroll Account</b> — uses ZROK_PRIVATE_TOKEN from
-  .env automatically, or auto-creates account + enrolls
-• <b>🦆 Update DuckDNS</b> — force-push current IP
-
-<b>First-time order:</b> Check → Install → Enroll → Done
+<b>/zrok_install_local</b>  ← if apt fails
+1. Copy <code>zrok_x.x.x_linux_amd64.tar.gz</code>
+   into <code>/home/d/Tele_docker/</code> via SSH/WinSCP
+2. Run /zrok_install_local — bot installs automatically
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
-<b>/expose</b>
-Step-by-step wizard to create a public tunnel:
-
-Step 1 — Enter local port or URL:
-<code>8080</code>  or  <code>http://localhost:3000</code>
-
-Step 2 — Health check:
-Bot pings the URL. If unreachable → aborts with reason.
-
-Step 3 — Basic Auth (tap button):
-• 🔒 Yes → enter username, then password
-• 🔓 No → open access
-
-Step 4 — Tunnel launches, bot returns public URL + ID.
+<b>/zrok_setup</b>  — button panel:
+• <b>🔍 Check Status</b> — binary installed? enrolled?
+  Also shows zrok2-controller systemd service state
+• <b>📥 Install zrok</b> — tries apt, then local file
+• <b>🔑 Enroll Account</b> — auto-creates account using
+  ZROK_PRIVATE_TOKEN (admin token) + email/password
+• <b>🦆 Update DuckDNS</b> — push current IP
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
-<b>/tunnel_status</b>
-All running tunnels + DuckDNS info in one view.
+<b>/expose</b> — create a public tunnel:
+Step 1 → enter port: <code>8080</code>
+Step 2 → health check (bot pings it)
+Step 3 → basic auth yes/no
+Step 4 → tunnel launches, public URL returned
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
-<b>/revoke &lt;id&gt;</b>
-Kill a tunnel instantly — URL goes 404 immediately.
-No arg → shows tap-able button list of active tunnels."""
+<b>/tunnel_status</b> — all active tunnels + DuckDNS
+
+<b>/revoke &lt;id&gt;</b> — kill tunnel instantly (URL → 404)
+No arg → tap-able button list"""
     ),
     (
         "duckdns",

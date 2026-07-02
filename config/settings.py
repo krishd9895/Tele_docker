@@ -14,12 +14,17 @@ class Settings(BaseSettings):
     DB_PATH: str = "data/manager.db"
     DEPLOYMENT_TIMEOUT: int = 600
     TOTP_SECRET: str | None = None
-    ZROK_BINARY: str = "zrok"
-    ZROK_PRIVATE_TOKEN: str | None = None
-    ZROK_API_ENDPOINT: str | None = None
+    ZROK_BINARY: str = "zrok2"
+    ZROK_PRIVATE_TOKEN: str | None = None   # ZROK2_ADMIN_TOKEN from bootstrap
+    ZROK_API_ENDPOINT: str | None = None    # e.g. http://127.0.0.1:18080
     ZROK_ACCOUNT_EMAIL: str = "admin@tele.local"
     ZROK_ACCOUNT_PASSWORD: str = "changeme123"
-    ZROK_CONTROLLER_DIR: str | None = None   # host folder containing zrok docker-compose.yml
+    # Bootstrap variables — only needed for /zrok_bootstrap command
+    ZROK2_DNS_ZONE: str | None = None          # e.g. zrok.kyone.duckdns.org
+    ZITI_ADMIN_PASSWORD: str | None = None     # OpenZiti admin password
+    ZITI_API_ENDPOINT: str = "https://127.0.0.1:1280"
+    ZROK2_TLS_CERT: str | None = None          # optional, e.g. /etc/letsencrypt/live/.../fullchain.pem
+    ZROK2_TLS_KEY: str | None = None           # optional
     DUCKDNS_TOKEN: str | None = None
     DUCKDNS_DOMAIN: str | None = None          # just subdomain, e.g. "yourname"
     DUCKDNS_UPDATE_INTERVAL: int = 300         # seconds between auto IP updates

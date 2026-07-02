@@ -86,92 +86,108 @@ class ZrokTunnelEngine:
     # ── Setup helpers ─────────────────────────────────────────────────────────
 
     async def is_installed(self) -> bool:
-        code, out = await asyncio.to_thread(_ssh_exec, "which zrok || command -v zrok")
+        """Check if zrok2 or zrok binary exists on the host."""
+        code, out = await asyncio.to_thread(
+            _ssh_exec, "which zrok2 2>/dev/null || which zrok 2>/dev/null || command -v zrok2 2>/dev/null"
+        )
         return code == 0 and bool(out.strip())
 
     async def is_enrolled(self) -> bool:
-        code, out = await asyncio.to_thread(_ssh_exec, "zrok status 2>&1")
+        """Check if zrok2/zrok has been enrolled on this host."""
+        code, out = await asyncio.to_thread(
+            _ssh_exec, "zrok2 status 2>&1 || zrok status 2>&1"
+        )
         return code == 0 and "not enabled" not in out.lower()
 
     async def install_zrok(self) -> tuple[bool, str]:
         """
-        Download and install zrok binary on the WSL host.
-        Tries self-hosted download first (no internet needed),
-        falls back to the official install script.
+        Install zrok2 on the WSL host (Ubuntu/Debian).
+        Uses apt if available, falls back to self-hosted binary download.
         """
+        # Try apt install first (Debian/Ubuntu — zrok2 package)
+        apt_cmd = (
+            'sudo apt-get update -qq 2>&1 && '
+            'sudo apt-get install -y zrok2 2>&1 && '
+            'echo "zrok2 installed via apt"'
+        )
+        code, out = await asyncio.to_thread(_ssh_exec, apt_cmd, timeout=120)
+        if code == 0 and "zrok2 installed" in out:
+            return True, out
+
+        # Try self-hosted binary download from controller
         endpoint = runtime_settings.ZROK_API_ENDPOINT
-
         if endpoint:
-            # Self-hosted zrok controller serves its own binary at /api/download
-            # Try to download directly from your controller — no internet needed
             host = endpoint.rstrip("/")
-            install_cmd = (
+            dl_cmd = (
                 f'curl -sSfL "{host}/api/download?os=linux&arch=amd64" '
-                f'-o /tmp/zrok.tar.gz 2>&1 && '
-                f'tar -xzf /tmp/zrok.tar.gz -C /tmp 2>&1 && '
-                f'sudo mv /tmp/zrok /usr/local/bin/zrok 2>&1 && '
-                f'chmod +x /usr/local/bin/zrok && '
-                f'echo "zrok installed from self-hosted controller"'
+                f'-o /tmp/zrok2.tar.gz 2>&1 && '
+                f'tar -xzf /tmp/zrok2.tar.gz -C /tmp 2>&1 && '
+                f'sudo mv /tmp/zrok2 /usr/local/bin/zrok2 2>/dev/null || '
+                f'mv /tmp/zrok2 /usr/local/bin/zrok2 2>&1 && '
+                f'chmod +x /usr/local/bin/zrok2 && '
+                f'echo "zrok2 installed from self-hosted controller"'
             )
-            code, out = await asyncio.to_thread(_ssh_exec, install_cmd)
-            if code == 0 and "zrok installed" in out:
+            code, out = await asyncio.to_thread(_ssh_exec, dl_cmd, timeout=120)
+            if code == 0 and "installed" in out:
                 return True, out
-            # Self-hosted download failed — log and try official script
-            logger.warning(f"Self-hosted install failed ({out[:100]}), trying official script...")
 
-        # Fallback: official install script (requires internet)
-        code, out = await asyncio.to_thread(_ssh_exec, ZROK_INSTALL_SCRIPT)
-        if code == 0:
-            return True, out or "zrok installed successfully."
         return False, (
             f"{out}\n\n"
-            "Could not install zrok automatically.\n"
-            "Your host may not have internet access.\n\n"
-            "Manual option — run this on your host:\n"
-            f"  curl -sSfL {endpoint}/api/download?os=linux&arch=amd64 -o /tmp/zrok.tar.gz\n"
-            f"  tar -xzf /tmp/zrok.tar.gz -C /tmp\n"
-            f"  sudo mv /tmp/zrok /usr/local/bin/zrok"
+            "Automatic install failed.\n\n"
+            "Use /zrok_install_local to install from a local file:\n"
+            "1. Download zrok_x.x.x_linux_amd64.tar.gz from GitHub\n"
+            "2. Copy it to /home/d/Tele_docker/ via SSH\n"
+            "3. Run /zrok_install_local"
         )
 
     async def enroll_zrok(self, token: str) -> tuple[bool, str]:
+        """
+        Run `zrok2 enable <token>` pointing at self-hosted controller.
+        Falls back to `zrok enable` for older installations.
+        """
         token = token.strip()
-        endpoint = runtime_settings.ZROK_API_ENDPOINT
-        if endpoint:
-            cmd = f"zrok enable --ctrl-endpoint {endpoint} {token}"
-        else:
-            cmd = f"zrok enable {token}"
+        endpoint = runtime_settings.ZROK_API_ENDPOINT or "http://127.0.0.1:18080"
+        # Try zrok2 first (new version)
+        cmd = f'ZROK2_API_ENDPOINT="{endpoint}" zrok2 enable {token} 2>&1'
         code, out = await asyncio.to_thread(_ssh_exec, cmd)
         if code == 0:
             return True, out or "Enrollment successful."
-        return False, out or "Enrollment failed."
+        # Fallback: old zrok binary
+        cmd2 = f'ZROK_API_ENDPOINT="{endpoint}" zrok enable --ctrl-endpoint "{endpoint}" {token} 2>&1'
+        code2, out2 = await asyncio.to_thread(_ssh_exec, cmd2)
+        if code2 == 0:
+            return True, out2 or "Enrollment successful."
+        return False, out or out2 or "Enrollment failed."
 
     async def create_account_and_get_token(self) -> tuple[bool, str]:
         """
-        Runs docker compose exec zrok-controller zrok admin create account on the host,
-        parses accountToken from output, returns (True, token) or (False, error).
+        Creates a zrok2 account via the admin CLI on the WSL host.
+        zrok2 runs as a systemd service — no docker exec needed.
+
+        Equivalent of:
+          ZROK2_API_ENDPOINT=http://127.0.0.1:18080 \
+          ZROK2_ADMIN_TOKEN=<token> \
+          zrok2 admin create account <email> <password>
         """
         email = runtime_settings.ZROK_ACCOUNT_EMAIL
         password = runtime_settings.ZROK_ACCOUNT_PASSWORD
+        admin_token = runtime_settings.ZROK_PRIVATE_TOKEN   # used as ZROK2_ADMIN_TOKEN if set
+        endpoint = runtime_settings.ZROK_API_ENDPOINT or "http://127.0.0.1:18080"
+
         if not email or not password:
             return False, "ZROK_ACCOUNT_EMAIL or ZROK_ACCOUNT_PASSWORD not set in .env"
 
-        controller_dir = runtime_settings.ZROK_CONTROLLER_DIR
-        if not controller_dir:
-            return False, (
-                "ZROK_CONTROLLER_DIR not set in .env\n\n"
-                "Set it to the folder on your host that contains your zrok docker-compose.yml\n"
-                "Example: ZROK_CONTROLLER_DIR=/home/d/Kwz\n\n"
-                "Check with /host ls to find the right folder."
-            )
+        # Build env prefix for the command
+        env_prefix = f'ZROK2_API_ENDPOINT="{endpoint}"'
+        if admin_token and admin_token != "your_account_token_here":
+            env_prefix += f' ZROK2_ADMIN_TOKEN="{admin_token}"'
 
-        cmd = (
-            f'cd "{controller_dir}" && '
-            f'docker compose exec -T zrok-controller '
-            f'zrok admin create account {email} {password} 2>&1'
-        )
-        logger.info(f"Creating zrok account for {email} in {controller_dir}...")
+        cmd = f'{env_prefix} zrok2 admin create account {email} {password} 2>&1'
+
+        logger.info(f"Creating zrok2 account for {email} at {endpoint}...")
         code, output = await asyncio.to_thread(_ssh_exec, cmd)
 
+        # Parse accountToken from output
         token = None
         for line in output.splitlines():
             line = line.strip()
@@ -183,15 +199,17 @@ class ZrokTunnelEngine:
                 break
 
         if token:
-            logger.info(f"zrok accountToken obtained for {email}")
+            logger.info(f"zrok2 accountToken obtained for {email}")
             runtime_settings.ZROK_PRIVATE_TOKEN = token
             return True, token
 
         return False, (
             f"Could not parse accountToken from output.\n\n"
             f"Raw output:\n{output[:1000]}\n\n"
-            f"Make sure ZROK_CONTROLLER_DIR is correct and the zrok-controller container is running.\n"
-            f"Try: /host ls {controller_dir}"
+            f"Make sure:\n"
+            f"• zrok2-controller service is running: sudo systemctl status zrok2-controller\n"
+            f"• ZROK_API_ENDPOINT is set correctly (default: http://127.0.0.1:18080)\n"
+            f"• ZROK_PRIVATE_TOKEN contains the ZROK2_ADMIN_TOKEN from bootstrap"
         )
 
     async def auto_enroll_if_needed(self) -> None:
@@ -228,7 +246,7 @@ class ZrokTunnelEngine:
             logger.error(f"zrok auto-enrollment failed: {out[:200]}")
 
     async def get_zrok_status(self) -> str:
-        _, out = await asyncio.to_thread(_ssh_exec, "zrok status 2>&1")
+        _, out = await asyncio.to_thread(_ssh_exec, "zrok2 status 2>&1 || zrok status 2>&1")
         return out or "(no output)"
 
     # ── Create tunnel ─────────────────────────────────────────────────────────

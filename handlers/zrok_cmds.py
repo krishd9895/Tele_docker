@@ -286,13 +286,13 @@ async def cmd_zrok_setup(message: Message):
 @zrok_router.callback_query(F.data == "zrok:status")
 async def cb_zrok_status(call: CallbackQuery):
     await call.answer()
-    msg = await call.message.answer("🔍 Checking zrok status on host...", parse_mode="HTML")
+    msg = await call.message.answer("🔍 Checking zrok2 status on host...", parse_mode="HTML")
 
     installed = await zrok_engine.is_installed()
     if not installed:
         await msg.edit_text(
-            "📦 <b>zrok:</b> ❌ Not installed\n\n"
-            "Use the <b>Install zrok</b> button to install it.",
+            "📦 <b>zrok2:</b> ❌ Not installed\n\n"
+            "Use <b>Install zrok</b> or run /zrok_install_local.",
             parse_mode="HTML"
         )
         return
@@ -301,9 +301,14 @@ async def cb_zrok_status(call: CallbackQuery):
     raw_status = await zrok_engine.get_zrok_status()
     trimmed = raw_status[-2000:] if len(raw_status) > 2000 else raw_status
 
+    # Check systemd service
+    _, svc = await asyncio.to_thread(_ssh_exec, "systemctl is-active zrok2-controller 2>&1")
+    svc_badge = "🟢 running" if svc.strip() == "active" else f"🔴 {svc.strip()}"
+
     await msg.edit_text(
-        f"📦 <b>zrok:</b> ✅ Installed\n"
-        f"🔑 <b>Enrollment:</b> {'✅ Enrolled' if enrolled else '❌ Not enrolled'}\n\n"
+        f"📦 <b>zrok2 binary:</b> ✅ Installed\n"
+        f"🔑 <b>Enrollment:</b> {'✅ Enrolled' if enrolled else '❌ Not enrolled'}\n"
+        f"⚙️ <b>zrok2-controller:</b> {svc_badge}\n\n"
         f"<pre>{trimmed}</pre>",
         parse_mode="HTML"
     )
@@ -313,24 +318,220 @@ async def cb_zrok_status(call: CallbackQuery):
 async def cb_zrok_install(call: CallbackQuery):
     await call.answer()
     msg = await call.message.answer(
-        "📥 <b>Installing zrok on WSL host...</b>\n"
-        "<i>This may take up to 60 seconds.</i>",
+        "📥 <b>Installing zrok2 on WSL host...</b>\n"
+        "<i>Trying apt install first, then fallbacks.</i>",
         parse_mode="HTML"
     )
     success, output = await zrok_engine.install_zrok()
     trimmed = output[-2000:] if len(output) > 2000 else output
     if success:
         await msg.edit_text(
-            f"✅ <b>zrok Installed Successfully</b>\n\n<pre>{trimmed}</pre>\n\n"
-            f"Next: tap <b>Enroll Account</b> and paste your <code>accountToken</code>\n"
-            f"from your self-hosted zrok controller.",
+            f"✅ <b>zrok2 Installed Successfully</b>\n\n<pre>{trimmed}</pre>\n\n"
+            f"Next: tap <b>Enroll Account</b>.",
             parse_mode="HTML"
         )
     else:
         await msg.edit_text(
-            f"❌ <b>Installation Failed</b>\n\n<pre>{trimmed}</pre>",
+            f"❌ <b>Installation Failed</b>\n\n<pre>{trimmed}</pre>\n\n"
+            f"Try /zrok_install_local instead.",
             parse_mode="HTML"
         )
+
+
+# ── /zrok_bootstrap ───────────────────────────────────────────────────────────
+
+@zrok_router.message(Command("zrok_bootstrap"))
+@require_2fa
+async def cmd_zrok_bootstrap(message: Message):
+    """
+    Runs the full zrok2 automated bootstrap (Path A) on the WSL host.
+    Requires:
+      - zrok2 packages already installed (apt install zrok2 zrok2-controller ...)
+      - OpenZiti controller running
+      - ZITI_ADMIN_PASSWORD, ZROK2_DNS_ZONE set in .env
+    Generates and saves ZROK2_ADMIN_TOKEN automatically.
+    """
+    s = runtime_settings
+    missing = []
+    if not s.ZROK2_DNS_ZONE:    missing.append("ZROK2_DNS_ZONE")
+    if not s.ZITI_ADMIN_PASSWORD: missing.append("ZITI_ADMIN_PASSWORD")
+
+    if missing:
+        await message.answer(
+            f"⚠️ <b>Missing .env variables:</b>\n"
+            + "\n".join(f"• <code>{v}</code>" for v in missing)
+            + "\n\nSet them and rebuild before running /zrok_bootstrap.",
+            parse_mode="HTML"
+        )
+        return
+
+    status = await message.answer(
+        "🚀 <b>Running zrok2 bootstrap on WSL host...</b>\n\n"
+        "<i>This installs PostgreSQL, RabbitMQ, InfluxDB and configures\n"
+        "all systemd services. May take 2–3 minutes.</i>",
+        parse_mode="HTML"
+    )
+
+    # Step 1: Install packages
+    await status.edit_text(
+        "📦 <b>Step 1/3 — Installing zrok2 packages...</b>", parse_mode="HTML"
+    )
+    code, out = await asyncio.to_thread(
+        _ssh_exec,
+        "sudo apt-get update -qq 2>&1 && "
+        "sudo apt-get install -y zrok2 zrok2-controller zrok2-frontend zrok2-metrics-bridge 2>&1",
+        timeout=300
+    )
+    if code != 0:
+        await status.edit_text(
+            f"❌ <b>Package install failed</b>\n\n<pre>{out[-1500:]}</pre>",
+            parse_mode="HTML"
+        )
+        return
+
+    # Step 2: Generate admin token and run bootstrap script
+    await status.edit_text(
+        "⚙️ <b>Step 2/3 — Running bootstrap script...</b>\n"
+        "<i>Configuring PostgreSQL, RabbitMQ, InfluxDB...</i>",
+        parse_mode="HTML"
+    )
+
+    # Build export commands
+    env_vars = [
+        f'ZROK2_DNS_ZONE="{s.ZROK2_DNS_ZONE}"',
+        f'ZITI_API_ENDPOINT="{s.ZITI_API_ENDPOINT}"',
+        f'ZITI_ADMIN_PASSWORD="{s.ZITI_ADMIN_PASSWORD}"',
+    ]
+    if s.ZROK2_TLS_CERT:
+        env_vars.append(f'ZROK2_TLS_CERT="{s.ZROK2_TLS_CERT}"')
+    if s.ZROK2_TLS_KEY:
+        env_vars.append(f'ZROK2_TLS_KEY="{s.ZROK2_TLS_KEY}"')
+
+    # Generate admin token and capture it
+    bootstrap_cmd = (
+        'ZROK2_ADMIN_TOKEN="$(head -c24 /dev/urandom | base64 -w0)" && '
+        'echo "GENERATED_TOKEN:$ZROK2_ADMIN_TOKEN" && '
+        + " ".join(f"export {v} &&" for v in env_vars)
+        + ' export ZROK2_ADMIN_TOKEN && '
+        'sudo -E /usr/share/zrok/nfpm/zrok2-bootstrap.bash 2>&1'
+    )
+    code, out = await asyncio.to_thread(_ssh_exec, bootstrap_cmd, timeout=300)
+
+    # Extract the generated admin token from output
+    admin_token = None
+    for line in out.splitlines():
+        if line.startswith("GENERATED_TOKEN:"):
+            admin_token = line.split("GENERATED_TOKEN:", 1)[1].strip()
+            break
+
+    trimmed = out[-2500:] if len(out) > 2500 else out
+
+    if code != 0:
+        await status.edit_text(
+            f"❌ <b>Bootstrap failed</b>\n\n<pre>{trimmed}</pre>",
+            parse_mode="HTML"
+        )
+        return
+
+    # Step 3: Start services
+    await status.edit_text(
+        "🔧 <b>Step 3/3 — Starting systemd services...</b>", parse_mode="HTML"
+    )
+    svc_cmd = (
+        "sudo systemctl enable --now zrok2-controller zrok2-frontend zrok2-metrics-bridge 2>&1"
+    )
+    code2, svc_out = await asyncio.to_thread(_ssh_exec, svc_cmd, timeout=60)
+
+    token_note = ""
+    if admin_token:
+        runtime_settings.ZROK_PRIVATE_TOKEN = admin_token
+        token_note = (
+            f"\n\n🔑 <b>Admin token generated:</b>\n"
+            f"<code>{admin_token}</code>\n\n"
+            f"Add this to your .env:\n"
+            f"<code>ZROK_PRIVATE_TOKEN={admin_token}</code>"
+        )
+    else:
+        token_note = (
+            "\n\n⚠️ Could not auto-extract admin token.\n"
+            "Check the output above and manually set <code>ZROK_PRIVATE_TOKEN</code> in .env."
+        )
+
+    await status.edit_text(
+        f"✅ <b>Bootstrap Complete</b>\n\n"
+        f"<pre>{trimmed[-1500:]}</pre>"
+        f"{token_note}\n\n"
+        f"Now use /zrok_setup → <b>Enroll Account</b> to create your user account.",
+        parse_mode="HTML"
+    )
+
+
+# ── /zrok_services ────────────────────────────────────────────────────────────
+
+@zrok_router.message(Command("zrok_services"))
+@require_2fa
+async def cmd_zrok_services(message: Message):
+    """Show status and start/stop controls for all zrok2 systemd services."""
+    services = ["zrok2-controller", "zrok2-frontend", "zrok2-metrics-bridge"]
+
+    lines = ["⚙️ <b>zrok2 Services</b>\n"]
+    buttons = []
+
+    for svc in services:
+        _, status_out = await asyncio.to_thread(_ssh_exec, f"systemctl is-active {svc} 2>&1")
+        is_active = status_out.strip() == "active"
+        badge = "🟢" if is_active else "🔴"
+        action = "stop" if is_active else "start"
+        action_label = "⏹ Stop" if is_active else "▶ Start"
+        lines.append(f"{badge} <code>{svc}</code>")
+        buttons.append([InlineKeyboardButton(
+            text=f"{action_label} {svc.replace('zrok2-', '')}",
+            callback_data=f"zsvc:{action}:{svc}"
+        )])
+
+    buttons.append([InlineKeyboardButton(text="🔄 Restart All", callback_data="zsvc:restart:all")])
+    buttons.append([InlineKeyboardButton(text="🔃 Refresh", callback_data="zsvc:refresh")])
+
+    await message.answer(
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+
+
+@zrok_router.callback_query(F.data.startswith("zsvc:"))
+async def cb_zrok_service(call: CallbackQuery):
+    await call.answer()
+    parts = call.data.split(":")
+    action = parts[1]
+    target = parts[2] if len(parts) > 2 else ""
+
+    if action == "refresh":
+        await call.message.delete()
+        # Re-trigger the command
+        await cmd_zrok_services(call.message)
+        return
+
+    if action == "restart" and target == "all":
+        cmd = "sudo systemctl restart zrok2-controller zrok2-frontend zrok2-metrics-bridge 2>&1"
+        label = "Restarted all services"
+    elif action in ("start", "stop", "restart"):
+        cmd = f"sudo systemctl {action} {target} 2>&1"
+        label = f"{action.capitalize()}ed {target}"
+    else:
+        return
+
+    msg = await call.message.answer(f"⏳ {label}...", parse_mode="HTML")
+    code, out = await asyncio.to_thread(_ssh_exec, cmd, timeout=30)
+
+    if code == 0:
+        await msg.edit_text(f"✅ <b>{label}</b>", parse_mode="HTML")
+    else:
+        await msg.edit_text(
+            f"❌ <b>Failed:</b> {label}\n\n<pre>{out[:500]}</pre>",
+            parse_mode="HTML"
+        )
+    await delete_after(msg, delay=10)
 
 
 @zrok_router.callback_query(F.data == "zrok:enroll")
