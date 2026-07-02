@@ -15,32 +15,44 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./data:/app/data
-      # zrok binary — adjust source path to where zrok is installed on your WSL host
-      - /usr/local/bin/zrok:/usr/local/bin/zrok:ro
-      # zrok account enrollment (~/.zrok) so the container uses your enrolled identity
-      - ${HOME}/.zrok:/root/.zrok:ro
     environment:
+      # ── Core ──────────────────────────────────────────────────────────────
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - ALLOWED_USER_ID=${ALLOWED_USER_ID}
-      - SECRET_ADMIN_PASSWORD=${SECRET_ADMIN_PASSWORD}
-      - MONGO_URI=${MONGO_URI}
-      - TOTP_SECRET=${TOTP_SECRET}
-      - HOST_SSH_USER=${HOST_SSH_USER}
-      - HOST_SSH_PASSWORD=${HOST_SSH_PASSWORD}
-      - ZROK_BINARY=${ZROK_BINARY:-zrok}
-      - ZROK_PRIVATE_TOKEN=${ZROK_PRIVATE_TOKEN}
-      - ZROK_API_ENDPOINT=${ZROK_API_ENDPOINT}
+      - SECRET_ADMIN_PASSWORD=${SECRET_ADMIN_PASSWORD:-}
+      - MONGO_URI=${MONGO_URI:-}
+      - DB_PATH=${DB_PATH:-data/manager.db}
+      - DEPLOYMENT_TIMEOUT=${DEPLOYMENT_TIMEOUT:-600}
+
+      # ── Security ──────────────────────────────────────────────────────────
+      - TOTP_SECRET=${TOTP_SECRET:-}
+
+      # ── Host SSH Bridge ───────────────────────────────────────────────────
+      - HOST_SSH_USER=${HOST_SSH_USER:-}
+      - HOST_SSH_PASSWORD=${HOST_SSH_PASSWORD:-}
+
+      # ── Git scanning ──────────────────────────────────────────────────────
+      - GIT_SCAN_PATHS=${GIT_SCAN_PATHS:-}
+
+      # ── DuckDNS ───────────────────────────────────────────────────────────
+      - DUCKDNS_TOKEN=${DUCKDNS_TOKEN:-}
+      - DUCKDNS_DOMAIN=${DUCKDNS_DOMAIN:-}
+      - DUCKDNS_UPDATE_INTERVAL=${DUCKDNS_UPDATE_INTERVAL:-300}
+
+      # ── zrok2 ─────────────────────────────────────────────────────────────
+      - ZROK_BINARY=${ZROK_BINARY:-zrok2}
+      - ZROK_PRIVATE_TOKEN=${ZROK_PRIVATE_TOKEN:-}
+      - ZROK_API_ENDPOINT=${ZROK_API_ENDPOINT:-http://127.0.0.1:18080}
       - ZROK_ACCOUNT_EMAIL=${ZROK_ACCOUNT_EMAIL:-admin@tele.local}
       - ZROK_ACCOUNT_PASSWORD=${ZROK_ACCOUNT_PASSWORD:-changeme123}
-      - ZROK2_DNS_ZONE=${ZROK2_DNS_ZONE}
-      - ZITI_ADMIN_PASSWORD=${ZITI_ADMIN_PASSWORD}
+
+      # ── zrok2 Bootstrap (optional — only used by /zrok_bootstrap command) ─
+      - ZROK2_DNS_ZONE=${ZROK2_DNS_ZONE:-}
+      - ZITI_ADMIN_PASSWORD=${ZITI_ADMIN_PASSWORD:-}
       - ZITI_API_ENDPOINT=${ZITI_API_ENDPOINT:-https://127.0.0.1:1280}
-      - ZROK2_TLS_CERT=${ZROK2_TLS_CERT}
-      - ZROK2_TLS_KEY=${ZROK2_TLS_KEY}
-      - GIT_SCAN_PATHS=${GIT_SCAN_PATHS}
-      - DUCKDNS_TOKEN=${DUCKDNS_TOKEN}
-      - DUCKDNS_DOMAIN=${DUCKDNS_DOMAIN}
-      - DUCKDNS_UPDATE_INTERVAL=${DUCKDNS_UPDATE_INTERVAL:-300}
+      - ZROK2_TLS_CERT=${ZROK2_TLS_CERT:-}
+      - ZROK2_TLS_KEY=${ZROK2_TLS_KEY:-}
+
     logging:
       driver: "json-file"
       options:
@@ -62,7 +74,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
-      - TELEGRAM_BOT_TOKEN=${RESCUE_BOT_TOKEN}
+      - TELEGRAM_BOT_TOKEN=${RESCUE_BOT_TOKEN:-}
       - ALLOWED_USER_ID=${ALLOWED_USER_ID}
     logging:
       driver: "json-file"
