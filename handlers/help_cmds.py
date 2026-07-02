@@ -163,13 +163,29 @@ Copy that value and add it to <code>.env</code>:
 Once set, the bot enrolls zrok automatically on every start.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
+<b>/zrok_install_local</b>  ← if auto-install fails
+No internet on WSL? Install manually:
+
+1. On your Windows PC, download:
+   <code>zrok_x.x.x_linux_amd64.tar.gz</code>
+   from github.com/openziti/zrok/releases
+
+2. Send /zrok_install_local to the bot
+
+3. Send the .tar.gz file to this chat
+
+Bot uploads it to WSL via SFTP, extracts it,
+and installs the binary — fully automatic.
+
+━━━━━━━━━━━━━━━━━━━━━━━━
 <b>/zrok_setup</b>
-Opens a button panel — no PC needed after that.
+Opens a button panel — no PC needed after install.
 
 • <b>🔍 Check Status</b> — installed? enrolled?
-• <b>📥 Install zrok</b> — installs binary on WSL host
+• <b>📥 Install zrok</b> — tries self-hosted download first,
+  falls back to official script
 • <b>🔑 Enroll Account</b> — uses ZROK_PRIVATE_TOKEN from
-  .env automatically, or lets you paste a token manually
+  .env automatically, or auto-creates account + enrolls
 • <b>🦆 Update DuckDNS</b> — force-push current IP
 
 <b>First-time order:</b> Check → Install → Enroll → Done
@@ -186,11 +202,9 @@ Bot pings the URL. If unreachable → aborts with reason.
 
 Step 3 — Basic Auth (tap button):
 • 🔒 Yes → enter username, then password
-  (password message deleted immediately)
 • 🔓 No → open access
 
-Step 4 — Tunnel launches.
-Bot returns the public HTTPS URL, tunnel ID, auth status.
+Step 4 — Tunnel launches, bot returns public URL + ID.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 <b>/tunnel_status</b>
@@ -199,8 +213,7 @@ All running tunnels + DuckDNS info in one view.
 ━━━━━━━━━━━━━━━━━━━━━━━━
 <b>/revoke &lt;id&gt;</b>
 Kill a tunnel instantly — URL goes 404 immediately.
-No arg → shows tap-able button list of active tunnels.
-<code>/revoke a1b2c3</code>"""
+No arg → shows tap-able button list of active tunnels."""
     ),
     (
         "duckdns",

@@ -31,6 +31,7 @@ async def cmd_welcome_menu(message: Message):
         "• /gitpull - Pull latest changes (picker or path)\n\n"
         "<b>🌐 Tunnel Management</b> <i>(requires 2FA)</i><b>:</b>\n"
         "• /zrok_setup - Install/enroll zrok + update DuckDNS\n"
+        "• /zrok_install_local - Install zrok from uploaded .tar.gz\n"
         "• /expose - Wizard: expose a local port via zrok\n"
         "• /tunnel_status - Active tunnels + DuckDNS IP status\n"
         "• /revoke <code>&lt;id&gt;</code> - Kill a tunnel instantly\n\n"

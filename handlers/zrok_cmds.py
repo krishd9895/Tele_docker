@@ -1,15 +1,19 @@
 """
 Zrok + DuckDNS tunnel management commands.
 
-/zrok_setup      — guided install + enroll wizard (no PC needed)
-/expose          — interactive wizard: port → health check → auth → tunnel
-/tunnel_status   — list active tunnels + DuckDNS domain info
-/revoke <id>     — kill a tunnel instantly
+/zrok_setup          — guided install + enroll wizard
+/zrok_install_local  — install zrok from an uploaded .tar.gz file
+/expose              — interactive wizard: port → health check → auth → tunnel
+/tunnel_status       — list active tunnels + DuckDNS domain info
+/revoke <id>         — kill a tunnel instantly
 
 All commands require a valid 2FA session.
 """
 
 import re
+import asyncio
+import os
+import paramiko
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
@@ -20,6 +24,7 @@ from services.zrok_service import zrok_engine
 from services.duckdns_service import duckdns_service
 from config.settings import runtime_settings
 from middlewares.totp_auth import require_2fa
+from utils.msg_cleaner import delete_after
 
 zrok_router = Router()
 
@@ -33,7 +38,29 @@ class ExposeStates(StatesGroup):
     waiting_for_password = State()
 
 class SetupStates(StatesGroup):
-    waiting_for_token = State()   # zrok enrollment token
+    waiting_for_token        = State()
+    waiting_for_zrok_tarball = State()   # waiting for .tar.gz upload
+
+
+# ── SSH helper ────────────────────────────────────────────────────────────────
+
+def _ssh_exec(cmd: str, timeout: int = 60) -> tuple[int, str]:
+    ssh_user = os.getenv("HOST_SSH_USER")
+    ssh_pass = os.getenv("HOST_SSH_PASSWORD")
+    if not ssh_user or not ssh_pass:
+        return -1, "HOST_SSH_USER / HOST_SSH_PASSWORD not set"
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        ssh.connect("127.0.0.1", username=ssh_user, password=ssh_pass, timeout=15)
+        _, stdout, stderr = ssh.exec_command(cmd, timeout=timeout)
+        code = stdout.channel.recv_exit_status()
+        out = stdout.read().decode(errors="ignore") + stderr.read().decode(errors="ignore")
+        return code, out.strip()
+    except Exception as e:
+        return -1, str(e)
+    finally:
+        ssh.close()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -47,6 +74,140 @@ def _normalise_target(raw: str) -> str:
     if not raw.startswith("http"):
         return f"http://{raw}"
     return raw
+
+
+# ── /zrok_install_local ───────────────────────────────────────────────────────
+
+@zrok_router.message(Command("zrok_install_local"))
+@require_2fa
+async def cmd_zrok_install_local(message: Message, state: FSMContext):
+    """
+    Manual zrok install from a downloaded binary.
+
+    Usage:
+      1. Download zrok_x.x.x_linux_amd64.tar.gz from GitHub releases
+         https://github.com/openziti/zrok/releases/latest
+      2. Send /zrok_install_local
+      3. Send the .tar.gz file to this chat
+      Bot extracts and installs it automatically.
+    """
+    await state.set_state(SetupStates.waiting_for_zrok_tarball)
+    reply = await message.answer(
+        "📦 <b>Manual zrok Install</b>\n\n"
+        "<b>Step 1:</b> Download the Linux binary from GitHub:\n"
+        "<a href='https://github.com/openziti/zrok/releases/latest'>"
+        "github.com/openziti/zrok/releases/latest</a>\n\n"
+        "Download: <code>zrok_x.x.x_linux_amd64.tar.gz</code>\n\n"
+        "<b>Step 2:</b> Send that file to this chat now.\n\n"
+        "<i>The bot will upload it to your WSL host, extract it, and install "
+        "the binary to <code>/usr/local/bin/zrok</code> automatically.</i>",
+        parse_mode="HTML",
+        disable_web_page_preview=True
+    )
+
+
+@zrok_router.message(SetupStates.waiting_for_zrok_tarball, F.document)
+async def handle_zrok_tarball(message: Message, state: FSMContext):
+    """Receive the .tar.gz, upload to host via SFTP, extract, and install."""
+    await state.clear()
+
+    doc = message.document
+    filename = doc.file_name or "zrok.tar.gz"
+
+    if not (filename.endswith(".tar.gz") or filename.endswith(".tgz")):
+        reply = await message.answer(
+            "⚠️ That doesn't look like a <code>.tar.gz</code> file.\n"
+            "Please send the correct zrok tarball.",
+            parse_mode="HTML"
+        )
+        await delete_after(reply, delay=15)
+        return
+
+    status = await message.answer(
+        f"📥 <b>Received:</b> <code>{filename}</code>\n"
+        f"⏳ Uploading to WSL host...",
+        parse_mode="HTML"
+    )
+
+    bot = message.bot
+    ssh_user = os.getenv("HOST_SSH_USER")
+    ssh_pass = os.getenv("HOST_SSH_PASSWORD")
+    tmp_path = f"/tmp/{filename}"
+
+    # ── 1. Download from Telegram and SFTP to host ────────────────────────
+    try:
+        tg_file = await bot.get_file(doc.file_id)
+        file_bytes_io = await bot.download_file(tg_file.file_path)
+        file_bytes = file_bytes_io.read()
+
+        def _sftp_upload():
+            import io
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            ssh.connect("127.0.0.1", username=ssh_user, password=ssh_pass, timeout=15)
+            try:
+                sftp = ssh.open_sftp()
+                sftp.putfo(io.BytesIO(file_bytes), tmp_path)
+                sftp.close()
+            finally:
+                ssh.close()
+
+        await asyncio.to_thread(_sftp_upload)
+    except Exception as e:
+        await status.edit_text(f"❌ <b>Upload to host failed:</b>\n<code>{e}</code>", parse_mode="HTML")
+        return
+
+    await status.edit_text(
+        f"✅ Uploaded to host at <code>{tmp_path}</code>\n"
+        f"⏳ Extracting and installing...",
+        parse_mode="HTML"
+    )
+
+    # ── 2. Extract + install on host ──────────────────────────────────────
+    install_cmds = [
+        f'tar -xzf {tmp_path} -C /tmp/',
+        'sudo mv /tmp/zrok /usr/local/bin/zrok 2>/dev/null || mv /tmp/zrok /usr/local/bin/zrok',
+        'chmod +x /usr/local/bin/zrok',
+        f'rm -f {tmp_path}',
+        'zrok version',
+    ]
+
+    output_lines = []
+    success = True
+    for cmd in install_cmds:
+        code, out = await asyncio.to_thread(_ssh_exec, cmd)
+        if out:
+            output_lines.append(f"$ {cmd}\n{out}")
+        if code != 0 and "zrok version" not in cmd:
+            # mv might fail with sudo if not in sudoers — try without sudo
+            if "sudo mv" in cmd:
+                code2, out2 = await asyncio.to_thread(
+                    _ssh_exec, cmd.replace("sudo mv", "mv")
+                )
+                if code2 == 0:
+                    continue
+            success = False
+            output_lines.append(f"⚠️ Command failed (exit {code})")
+            break
+
+    trimmed = "\n".join(output_lines)[-2000:]
+
+    if success:
+        await status.edit_text(
+            f"✅ <b>zrok Installed Successfully</b>\n\n"
+            f"<pre>{trimmed}</pre>\n\n"
+            f"Now tap /zrok_setup → <b>Enroll Account</b> to connect to your controller.",
+            parse_mode="HTML"
+        )
+    else:
+        await status.edit_text(
+            f"⚠️ <b>Install may have partially failed</b>\n\n"
+            f"<pre>{trimmed}</pre>\n\n"
+            f"Try manually:\n"
+            f"<code>/host mv /tmp/zrok /usr/local/bin/zrok</code>\n"
+            f"<code>/host chmod +x /usr/local/bin/zrok</code>",
+            parse_mode="HTML"
+        )
 
 
 def _tunnel_summary(tunnels: list[dict], duck_status: dict) -> str:
