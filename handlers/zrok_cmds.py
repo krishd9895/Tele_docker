@@ -101,8 +101,9 @@ async def cmd_zrok_setup(message: Message):
         "<b>Order for first-time setup:</b>\n"
         "1️⃣ Check Status\n"
         "2️⃣ Install zrok (if not installed)\n"
-        "3️⃣ Enroll Account (paste your token from zrok.io)\n"
-        "4️⃣ Done — use /expose to create tunnels",
+        "3️⃣ Enroll Account (uses ZROK_PRIVATE_TOKEN from .env, or paste manually)\n"
+        "4️⃣ Done — use /expose to create tunnels\n\n"
+        "💡 Set <code>ZROK_PRIVATE_TOKEN</code> in .env to skip step 3 on every restart.",
         parse_mode="HTML",
         reply_markup=keyboard
     )
@@ -147,10 +148,9 @@ async def cb_zrok_install(call: CallbackQuery):
     if success:
         await msg.edit_text(
             f"✅ <b>zrok Installed Successfully</b>\n\n<pre>{trimmed}</pre>\n\n"
-            f"Next: tap <b>Enroll Account</b> and paste your token from "
-            f"<a href='https://zrok.io'>zrok.io</a>.",
-            parse_mode="HTML",
-            disable_web_page_preview=True
+            f"Next: tap <b>Enroll Account</b> and paste your <code>accountToken</code>\n"
+            f"from your self-hosted zrok controller.",
+            parse_mode="HTML"
         )
     else:
         await msg.edit_text(
@@ -162,15 +162,44 @@ async def cb_zrok_install(call: CallbackQuery):
 @zrok_router.callback_query(F.data == "zrok:enroll")
 async def cb_zrok_enroll(call: CallbackQuery, state: FSMContext):
     await call.answer()
+
+    # If token is already pre-configured in .env, enroll directly — no paste needed
+    if runtime_settings.ZROK_PRIVATE_TOKEN:
+        msg = await call.message.answer(
+            "🔑 <b>Enrolling with token from .env...</b>\n"
+            "<i>Using ZROK_PRIVATE_TOKEN already configured.</i>",
+            parse_mode="HTML"
+        )
+        success, output = await zrok_engine.enroll_zrok(runtime_settings.ZROK_PRIVATE_TOKEN)
+        trimmed = output[-1500:] if len(output) > 1500 else output
+        if success:
+            await msg.edit_text(
+                f"✅ <b>Enrollment Successful</b>\n\n<pre>{trimmed}</pre>\n\n"
+                "You can now use /expose to create public tunnels.",
+                parse_mode="HTML"
+            )
+        else:
+            await msg.edit_text(
+                f"❌ <b>Enrollment Failed</b>\n\n<pre>{trimmed}</pre>",
+                parse_mode="HTML"
+            )
+        return
+
+    # No token in .env — ask user to paste it
     await state.set_state(SetupStates.waiting_for_token)
     await call.message.answer(
-        "🔑 <b>Enroll zrok Account</b>\n\n"
-        "1. Open <a href='https://zrok.io'>zrok.io</a> on your phone and sign up / log in.\n"
-        "2. Go to your account and copy the <b>enable token</b>.\n"
-        "3. Paste it here:\n\n"
+        "🔑 <b>Enroll zrok — Self-Hosted Setup</b>\n\n"
+        "Since you self-host zrok, your token comes from <b>your own server</b>, "
+        "not from zrok.io.\n\n"
+        "Run this on your server terminal:\n"
+        "<pre>docker compose exec zrok-controller \\\n"
+        "  zrok admin create account \\\n"
+        "  you@yourdomain.com yourpassword</pre>\n\n"
+        "Look for the line: <code>accountToken: &lt;string&gt;</code>\n"
+        "Copy that value and paste it here.\n\n"
+        "💡 <i>Tip: add it as ZROK_PRIVATE_TOKEN in .env to skip this step next time.</i>\n\n"
         "<i>Your message will be deleted immediately after reading.</i>",
-        parse_mode="HTML",
-        disable_web_page_preview=True
+        parse_mode="HTML"
     )
 
 

@@ -13,6 +13,7 @@ Sections navigated via inline buttons (no typing needed on mobile):
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from utils.msg_cleaner import delete_command
 
 help_router = Router()
 
@@ -142,21 +143,34 @@ Both commands show the full compose output in the reply
         """🌐 <b>Zrok Tunnel Management</b>
 
 Expose any local port to the internet as a public HTTPS URL.
-Powered by your self-hosted zrok instance.
+Runs on your <b>self-hosted</b> zrok instance — no zrok.io account needed.
 All tunnel commands <b>require 2FA</b>.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
-<b>/zrok_setup</b>
-Opens a button panel to install and configure zrok
-entirely from your phone — no PC needed.
+<b>Getting your token (self-hosted)</b>
 
-Buttons:
-• <b>🔍 Check Status</b> — is zrok installed? enrolled?
-• <b>📥 Install zrok</b> — runs the install script on your
-  WSL host via SSH bridge
-• <b>🔑 Enroll Account</b> — paste your token from zrok.io
-  (message deleted immediately)
-• <b>🦆 Update DuckDNS</b> — force-push your current IP
+Your token comes from YOUR server, not any website.
+Run this once on your server terminal:
+
+<code>docker compose exec zrok-controller \
+  zrok admin create account \
+  you@yourdomain.com yourpassword</code>
+
+Find the line: <code>accountToken: &lt;string&gt;</code>
+Copy that value and add it to <code>.env</code>:
+<code>ZROK_PRIVATE_TOKEN=that_string_here</code>
+
+Once set, the bot enrolls zrok automatically on every start.
+
+━━━━━━━━━━━━━━━━━━━━━━━━
+<b>/zrok_setup</b>
+Opens a button panel — no PC needed after that.
+
+• <b>🔍 Check Status</b> — installed? enrolled?
+• <b>📥 Install zrok</b> — installs binary on WSL host
+• <b>🔑 Enroll Account</b> — uses ZROK_PRIVATE_TOKEN from
+  .env automatically, or lets you paste a token manually
+• <b>🦆 Update DuckDNS</b> — force-push current IP
 
 <b>First-time order:</b> Check → Install → Enroll → Done
 
@@ -176,30 +190,17 @@ Step 3 — Basic Auth (tap button):
 • 🔓 No → open access
 
 Step 4 — Tunnel launches.
-Bot returns:
-• 🆔 Tunnel ID
-• 🌐 Public HTTPS URL
-• 🔒 Auth status
+Bot returns the public HTTPS URL, tunnel ID, auth status.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 <b>/tunnel_status</b>
-Lists all currently running tunnels + DuckDNS info:
-• Local target port/URL
-• Public zrok URL
-• Auth user (if protected)
-• Time created
+All running tunnels + DuckDNS info in one view.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 <b>/revoke &lt;id&gt;</b>
-Kill a tunnel instantly. The public URL returns 404
-within seconds.
-
-<b>No argument:</b> Shows active tunnels as tap-able buttons.
-<b>With ID:</b>
-<code>/revoke a1b2c3</code>
-
-You can also use a partial URL fragment:
-<code>/revoke myapp</code>"""
+Kill a tunnel instantly — URL goes 404 immediately.
+No arg → shows tap-able button list of active tunnels.
+<code>/revoke a1b2c3</code>"""
     ),
     (
         "duckdns",
@@ -344,6 +345,7 @@ def _section_keyboard(current_id: str) -> InlineKeyboardMarkup:
 
 @help_router.message(Command("help_guide"))
 async def cmd_help_guide(message: Message):
+    await delete_command(message)
     await message.answer(
         "📖 <b>Feature Guide</b>\n\n"
         "Select a topic to learn how to use it.\n"
@@ -351,6 +353,7 @@ async def cmd_help_guide(message: Message):
         parse_mode="HTML",
         reply_markup=_main_menu_keyboard()
     )
+    # Guide stays open — user navigates it interactively, no auto-delete
 
 
 @help_router.callback_query(F.data.startswith("hg:"))

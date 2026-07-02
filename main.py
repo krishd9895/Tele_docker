@@ -59,6 +59,9 @@ async def main():
     # Wire zrok binary path from settings
     zrok_engine.zrok_binary = runtime_settings.ZROK_BINARY
 
+    # Auto-enroll zrok if ZROK_PRIVATE_TOKEN is set and not yet enrolled
+    asyncio.create_task(zrok_engine.auto_enroll_if_needed())
+
     # Start DuckDNS auto-updater if configured
     if runtime_settings.DUCKDNS_TOKEN and runtime_settings.DUCKDNS_DOMAIN:
         asyncio.create_task(

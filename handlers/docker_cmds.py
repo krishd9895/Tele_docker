@@ -4,6 +4,7 @@ from aiogram.filters import Command
 from services.docker_service import docker_engine
 from services.monitor_service import monitor_service
 from middlewares.totp_auth import require_2fa
+from utils.msg_cleaner import delete_command, delete_after, auto_clean
 import asyncio
 
 docker_router = Router()
@@ -38,31 +39,39 @@ async def cmd_welcome_menu(message: Message):
         "• /health - Infrastructure Hardware Dashboard\n"
         "• /ls - Quick directory index listing\n"
         "• /cat <code>&lt;filename&gt;</code> - Print file text contents\n"
-        "• /download <code>&lt;path&gt;</code> - Pull file over Telegram\n\n"
+        "• /download <code>&lt;path&gt;</code> - Pull file over Telegram\n"
+        "• /upload - Push any file to a WSL path\n\n"
         "⚡ <i>Perimeter secured. Awaiting instruction parameters...</i>\n\n"
         "📖 For detailed usage of new features: /help_guide"
     )
-    await message.answer(menu_text, parse_mode="HTML")
+    reply = await message.answer(menu_text, parse_mode="HTML")
+    # Delete the /help command, keep the menu visible for 60s then clean up
+    await delete_command(message)
+    await delete_after(reply, delay=60)
 
 @docker_router.message(Command("docker_ps"))
 async def cmd_docker_ps(message: Message):
+    await delete_command(message)
     status_msg = await message.answer("🔄 Compiling system matrix state variables...")
     try:
         containers = await docker_engine.get_running_containers()
         if not containers:
             await status_msg.edit_text("ℹ️ No actively operating container clusters observed running globally.")
+            await delete_after(status_msg, delay=15)
             return
-
         response = "<b>📦 Active Container Footprints:</b>\n\n"
         for c in containers:
             tag = c.image.tags[0] if c.image.tags else 'Untagged'
             response += f"• <code>{c.name}</code> | {tag} | 🟢 <code>{c.status}</code>\n"
         await status_msg.edit_text(response, parse_mode="HTML")
+        await delete_after(status_msg, delay=30)
     except Exception as err:
         await status_msg.edit_text(f"❌ Structural exception: {str(err)}")
+        await delete_after(status_msg, delay=20)
 
 @docker_router.message(Command("health"))
 async def cmd_health(message: Message):
+    await delete_command(message)
     status_msg = await message.answer("📊 <i>Compiling physical cluster metrics...</i>", parse_mode="HTML")
     try:
         metrics = await monitor_service.compile_system_health_dashboard()
@@ -77,15 +86,19 @@ async def cmd_health(message: Message):
             f"• <b>OS Layer Subsystem:</b> {metrics['wsl']}\n"
         )
         await status_msg.edit_text(dashboard, parse_mode="HTML")
+        await delete_after(status_msg, delay=30)
     except Exception as e:
         await status_msg.edit_text(f"❌ Failed to extract hardware vectors: {e}")
+        await delete_after(status_msg, delay=20)
 
 @docker_router.message(Command("docker_logs"))
 async def cmd_docker_logs(message: Message):
     args = message.text.split()
     if len(args) < 2:
-        await message.answer("⚠️ Usage format: <code>/docker_logs &lt;container_name&gt;</code>", parse_mode="HTML")
+        reply = await message.answer("⚠️ Usage format: <code>/docker_logs &lt;container_name&gt;</code>", parse_mode="HTML")
+        await auto_clean(message, reply, reply_delay=10)
         return
+    await delete_command(message)
     target = args[1]
     status_msg = await message.answer(f"🔍 Extracting logs out of <code>{target}</code>...", parse_mode="HTML")
     try:
@@ -93,6 +106,7 @@ async def cmd_docker_logs(message: Message):
         matched = [c for c in containers if c.name == target]
         if not matched:
             await status_msg.edit_text("❌ Container not found.")
+            await delete_after(status_msg, delay=10)
             return
         logs_bytes = matched[0].logs(tail=200)
         logs_text = logs_bytes.decode('utf-8', errors='replace')
@@ -102,15 +116,20 @@ async def cmd_docker_logs(message: Message):
             await status_msg.delete()
         else:
             await status_msg.edit_text(f"📝 <b>Logs for {target}:</b>\n\n<pre>{logs_text}</pre>", parse_mode="HTML")
+            # Logs are useful — keep for 2 minutes
+            await delete_after(status_msg, delay=120)
     except Exception as trace_err:
         await status_msg.edit_text(f"❌ Error compiling logs sequence: {trace_err}")
+        await delete_after(status_msg, delay=20)
 
 @docker_router.message(Command("docker_restart"))
 async def cmd_docker_restart(message: Message):
     args = message.text.split()
     if len(args) < 2:
-        await message.answer("⚠️ Usage: <code>/docker_restart &lt;name&gt;</code>", parse_mode="HTML")
+        reply = await message.answer("⚠️ Usage: <code>/docker_restart &lt;name&gt;</code>", parse_mode="HTML")
+        await auto_clean(message, reply, reply_delay=10)
         return
+    await delete_command(message)
     target = args[1]
     status_msg = await message.answer(f"🔄 Power-cycling container: <code>{target}</code>...", parse_mode="HTML")
     try:
@@ -118,18 +137,22 @@ async def cmd_docker_restart(message: Message):
         matched = [c for c in containers if c.name == target]
         if not matched:
             await status_msg.edit_text("❌ Container not found.")
-            return
-        await asyncio.to_thread(matched[0].restart)
-        await status_msg.edit_text(f"✅ <b>Container power-cycled:</b> <code>{target}</code>", parse_mode="HTML")
+        else:
+            await asyncio.to_thread(matched[0].restart)
+            await status_msg.edit_text(f"✅ <b>Container power-cycled:</b> <code>{target}</code>", parse_mode="HTML")
+        await delete_after(status_msg, delay=12)
     except Exception as err:
         await status_msg.edit_text(f"❌ Cycle interruption fault: {err}")
+        await delete_after(status_msg, delay=20)
 
 @docker_router.message(Command("docker_stop"))
 async def cmd_docker_stop(message: Message):
     args = message.text.split()
     if len(args) < 2:
-        await message.answer("⚠️ Usage: <code>/docker_stop &lt;name&gt;</code>", parse_mode="HTML")
+        reply = await message.answer("⚠️ Usage: <code>/docker_stop &lt;name&gt;</code>", parse_mode="HTML")
+        await auto_clean(message, reply, reply_delay=10)
         return
+    await delete_command(message)
     target = args[1]
     status_msg = await message.answer(f"🛑 Stopping container: <code>{target}</code>...", parse_mode="HTML")
     try:
@@ -140,8 +163,10 @@ async def cmd_docker_stop(message: Message):
             await status_msg.edit_text(f"🛑 <b>Container stopped safely:</b> <code>{target}</code>", parse_mode="HTML")
         else:
             await status_msg.edit_text("❌ Container not found.")
+        await delete_after(status_msg, delay=12)
     except Exception as err:
         await status_msg.edit_text(f"❌ Stop failed: {err}")
+        await delete_after(status_msg, delay=20)
 
 
 # ── Shared helper: build project picker keyboard ──────────────────────────────
@@ -215,11 +240,13 @@ async def _do_compose_up(message: Message, project_path: str, manifest: str = No
             f"<pre>{trimmed}</pre>",
             parse_mode="HTML"
         )
+        await delete_after(status_msg, delay=60)
     else:
         await status_msg.edit_text(
             f"❌ <b>Compose Up Failed</b>\n\n<pre>{trimmed}</pre>",
             parse_mode="HTML"
         )
+        await delete_after(status_msg, delay=30)
 
 
 # ── /compose_down ─────────────────────────────────────────────────────────────
@@ -270,8 +297,10 @@ async def _do_compose_down(message: Message, project_path: str, manifest: str = 
             f"<pre>{trimmed}</pre>",
             parse_mode="HTML"
         )
+        await delete_after(status_msg, delay=30)
     else:
         await status_msg.edit_text(
             f"❌ <b>Compose Down Failed</b>\n\n<pre>{trimmed}</pre>",
             parse_mode="HTML"
         )
+        await delete_after(status_msg, delay=30)
