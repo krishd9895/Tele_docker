@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     ZROK_API_ENDPOINT: str | None = None
     ZROK_ACCOUNT_EMAIL: str = "admin@tele.local"
     ZROK_ACCOUNT_PASSWORD: str = "changeme123"
+    ZROK_CONTROLLER_DIR: str | None = None   # host folder containing zrok docker-compose.yml
     DUCKDNS_TOKEN: str | None = None
     DUCKDNS_DOMAIN: str | None = None          # just subdomain, e.g. "yourname"
     DUCKDNS_UPDATE_INTERVAL: int = 300         # seconds between auto IP updates
