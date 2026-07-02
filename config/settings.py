@@ -15,8 +15,10 @@ class Settings(BaseSettings):
     DEPLOYMENT_TIMEOUT: int = 600
     TOTP_SECRET: str | None = None
     ZROK_BINARY: str = "zrok"
-    ZROK_PRIVATE_TOKEN: str | None = None      # accountToken from: docker compose exec zrok-controller zrok admin create account
-    ZROK_API_ENDPOINT: str | None = None       # your self-hosted zrok controller URL e.g. https://zrok.yourdomain.com
+    ZROK_PRIVATE_TOKEN: str | None = None
+    ZROK_API_ENDPOINT: str | None = None
+    ZROK_ACCOUNT_EMAIL: str = "admin@tele.local"
+    ZROK_ACCOUNT_PASSWORD: str = "changeme123"
     DUCKDNS_TOKEN: str | None = None
     DUCKDNS_DOMAIN: str | None = None          # just subdomain, e.g. "yourname"
     DUCKDNS_UPDATE_INTERVAL: int = 300         # seconds between auto IP updates
