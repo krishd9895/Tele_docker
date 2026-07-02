@@ -39,7 +39,7 @@ class ExposeStates(StatesGroup):
 
 class SetupStates(StatesGroup):
     waiting_for_token        = State()
-    waiting_for_zrok_tarball = State()   # waiting for .tar.gz upload
+    waiting_for_zrok_url     = State()   # waiting for download URL
 
 
 # ── SSH helper ────────────────────────────────────────────────────────────────
@@ -78,129 +78,142 @@ def _normalise_target(raw: str) -> str:
 
 # ── /zrok_install_local ───────────────────────────────────────────────────────
 
+ZROK_LOCAL_SEARCH_DIRS = ["/home/d/Tele_docker", "/home/d", "/tmp"]
+
+
+def _find_zrok_tarball() -> str | None:
+    """Check known dirs on host for a zrok .tar.gz file. Returns full path or None."""
+    import re
+    for d in ZROK_LOCAL_SEARCH_DIRS:
+        code, out = _ssh_exec(
+            f'find "{d}" -maxdepth 1 -name "zrok*.tar.gz" -o -name "zrok*.tgz" 2>/dev/null | head -1'
+        )
+        if code == 0 and out.strip():
+            return out.strip()
+    return None
+
+
 @zrok_router.message(Command("zrok_install_local"))
 @require_2fa
 async def cmd_zrok_install_local(message: Message, state: FSMContext):
     """
-    Manual zrok install from a downloaded binary.
+    Install zrok from a local file already on the host, OR by pasting a URL.
 
-    Usage:
-      1. Download zrok_x.x.x_linux_amd64.tar.gz from GitHub releases
-         https://github.com/openziti/zrok/releases/latest
-      2. Send /zrok_install_local
-      3. Send the .tar.gz file to this chat
-      Bot extracts and installs it automatically.
+    Fastest way:
+      1. Copy zrok_x.x.x_linux_amd64.tar.gz into /home/d/Tele_docker/ via SSH/WinSCP
+      2. Run /zrok_install_local — bot finds and installs it automatically
+
+    Alternative (paste URL):
+      Bot will ask for a GitHub release URL and wget it on the host.
     """
-    await state.set_state(SetupStates.waiting_for_zrok_tarball)
-    reply = await message.answer(
-        "📦 <b>Manual zrok Install</b>\n\n"
-        "<b>Step 1:</b> Download the Linux binary from GitHub:\n"
-        "<a href='https://github.com/openziti/zrok/releases/latest'>"
-        "github.com/openziti/zrok/releases/latest</a>\n\n"
-        "Download: <code>zrok_x.x.x_linux_amd64.tar.gz</code>\n\n"
-        "<b>Step 2:</b> Send that file to this chat now.\n\n"
-        "<i>The bot will upload it to your WSL host, extract it, and install "
-        "the binary to <code>/usr/local/bin/zrok</code> automatically.</i>",
-        parse_mode="HTML",
-        disable_web_page_preview=True
-    )
+    status = await message.answer("🔍 <b>Checking for local zrok file...</b>", parse_mode="HTML")
 
+    # Check if file already exists on host
+    found_path = await asyncio.to_thread(_find_zrok_tarball)
 
-@zrok_router.message(SetupStates.waiting_for_zrok_tarball, F.document)
-async def handle_zrok_tarball(message: Message, state: FSMContext):
-    """Receive the .tar.gz, upload to host via SFTP, extract, and install."""
-    await state.clear()
-
-    doc = message.document
-    filename = doc.file_name or "zrok.tar.gz"
-
-    if not (filename.endswith(".tar.gz") or filename.endswith(".tgz")):
-        reply = await message.answer(
-            "⚠️ That doesn't look like a <code>.tar.gz</code> file.\n"
-            "Please send the correct zrok tarball.",
+    if found_path:
+        await status.edit_text(
+            f"✅ <b>Found local file:</b>\n<code>{found_path}</code>\n\n"
+            f"⏳ Installing now...",
             parse_mode="HTML"
         )
-        await delete_after(reply, delay=15)
+        await _do_zrok_install_from_path(status, found_path)
+    else:
+        # No local file found — ask for URL
+        await state.set_state(SetupStates.waiting_for_zrok_url)
+        await status.edit_text(
+            f"📭 <b>No local zrok file found</b> in:\n"
+            + "\n".join(f"• <code>{d}</code>" for d in ZROK_LOCAL_SEARCH_DIRS)
+            + "\n\n"
+            "<b>Option A (recommended):</b>\n"
+            "Copy <code>zrok_2.0.4_linux_amd64.tar.gz</code> into\n"
+            "<code>/home/d/Tele_docker/</code> via SSH/WinSCP,\n"
+            "then run /zrok_install_local again.\n\n"
+            "<b>Option B:</b>\n"
+            "Paste the GitHub download URL here:\n"
+            "<code>github.com/openziti/zrok/releases/latest</code>\n"
+            "→ find <code>zrok_x.x.x_linux_amd64.tar.gz</code> → copy link → paste",
+            parse_mode="HTML"
+        )
+
+
+@zrok_router.message(SetupStates.waiting_for_zrok_url)
+async def handle_zrok_url(message: Message, state: FSMContext):
+    """Receive GitHub URL, wget on host, extract, install."""
+    await state.clear()
+
+    url = (message.text or "").strip()
+    if not url.startswith("http"):
+        reply = await message.answer(
+            "⚠️ That doesn't look like a URL. Please paste the full download link.",
+            parse_mode="HTML"
+        )
+        await delete_after(reply, delay=10)
         return
 
+    filename = url.rstrip("/").split("/")[-1]
+    if not (filename.endswith(".tar.gz") or filename.endswith(".tgz")):
+        filename = "zrok_linux_amd64.tar.gz"
+    tmp_path = f"/home/d/Tele_docker/{filename}"
+
     status = await message.answer(
-        f"📥 <b>Received:</b> <code>{filename}</code>\n"
-        f"⏳ Uploading to WSL host...",
+        f"⬇️ <b>Downloading on WSL host...</b>\n<code>{url}</code>\n\n"
+        f"<i>Running wget directly on your host — may take a minute.</i>",
         parse_mode="HTML"
     )
 
-    bot = message.bot
-    ssh_user = os.getenv("HOST_SSH_USER")
-    ssh_pass = os.getenv("HOST_SSH_PASSWORD")
-    tmp_path = f"/tmp/{filename}"
-
-    # ── 1. Download from Telegram and SFTP to host ────────────────────────
-    try:
-        tg_file = await bot.get_file(doc.file_id)
-        file_bytes_io = await bot.download_file(tg_file.file_path)
-        file_bytes = file_bytes_io.read()
-
-        def _sftp_upload():
-            import io
-            ssh = paramiko.SSHClient()
-            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            ssh.connect("127.0.0.1", username=ssh_user, password=ssh_pass, timeout=15)
-            try:
-                sftp = ssh.open_sftp()
-                sftp.putfo(io.BytesIO(file_bytes), tmp_path)
-                sftp.close()
-            finally:
-                ssh.close()
-
-        await asyncio.to_thread(_sftp_upload)
-    except Exception as e:
-        await status.edit_text(f"❌ <b>Upload to host failed:</b>\n<code>{e}</code>", parse_mode="HTML")
+    dl_cmd = (
+        f'wget -q -O "{tmp_path}" "{url}" 2>&1 || '
+        f'curl -L -o "{tmp_path}" "{url}" 2>&1'
+    )
+    code, out = await asyncio.to_thread(_ssh_exec, dl_cmd, timeout=300)
+    if code != 0:
+        await status.edit_text(
+            f"❌ <b>Download failed</b>\n\n<pre>{out[:1500]}</pre>\n\n"
+            f"Copy the file manually to <code>/home/d/Tele_docker/</code> and retry.",
+            parse_mode="HTML"
+        )
         return
 
     await status.edit_text(
-        f"✅ Uploaded to host at <code>{tmp_path}</code>\n"
-        f"⏳ Extracting and installing...",
+        f"✅ Downloaded to <code>{tmp_path}</code>\n⏳ Installing...",
         parse_mode="HTML"
     )
+    await _do_zrok_install_from_path(status, tmp_path)
 
-    # ── 2. Extract + install on host ──────────────────────────────────────
-    install_cmds = [
-        f'tar -xzf {tmp_path} -C /tmp/',
-        'sudo mv /tmp/zrok /usr/local/bin/zrok 2>/dev/null || mv /tmp/zrok /usr/local/bin/zrok',
-        'chmod +x /usr/local/bin/zrok',
-        f'rm -f {tmp_path}',
-        'zrok version',
+
+async def _do_zrok_install_from_path(status_msg, tarball_path: str):
+    """Extract tarball, move binary to /usr/local/bin, verify."""
+    steps = [
+        (f'tar -xzf "{tarball_path}" -C /tmp/',                                        "Extract"),
+        ('mv /tmp/zrok /usr/local/bin/zrok || sudo mv /tmp/zrok /usr/local/bin/zrok',  "Move binary"),
+        ('chmod +x /usr/local/bin/zrok',                                               "Permissions"),
+        (f'rm -f "{tarball_path}"',                                                    "Cleanup tarball"),
+        ('zrok version',                                                                "Verify"),
     ]
 
     output_lines = []
     success = True
-    for cmd in install_cmds:
-        code, out = await asyncio.to_thread(_ssh_exec, cmd)
-        if out:
-            output_lines.append(f"$ {cmd}\n{out}")
-        if code != 0 and "zrok version" not in cmd:
-            # mv might fail with sudo if not in sudoers — try without sudo
-            if "sudo mv" in cmd:
-                code2, out2 = await asyncio.to_thread(
-                    _ssh_exec, cmd.replace("sudo mv", "mv")
-                )
-                if code2 == 0:
-                    continue
+    for cmd, label in steps:
+        code, out = await asyncio.to_thread(_ssh_exec, cmd, timeout=30)
+        if out.strip():
+            output_lines.append(f"[{label}]\n{out.strip()}")
+        if code != 0 and label not in ("Cleanup tarball",):
             success = False
-            output_lines.append(f"⚠️ Command failed (exit {code})")
+            output_lines.append(f"⚠️ [{label}] failed (exit {code})")
             break
 
-    trimmed = "\n".join(output_lines)[-2000:]
+    trimmed = "\n\n".join(output_lines)[-2000:]
 
     if success:
-        await status.edit_text(
+        await status_msg.edit_text(
             f"✅ <b>zrok Installed Successfully</b>\n\n"
             f"<pre>{trimmed}</pre>\n\n"
-            f"Now tap /zrok_setup → <b>Enroll Account</b> to connect to your controller.",
+            f"Now use /zrok_setup → <b>Enroll Account</b>.",
             parse_mode="HTML"
         )
     else:
-        await status.edit_text(
+        await status_msg.edit_text(
             f"⚠️ <b>Install may have partially failed</b>\n\n"
             f"<pre>{trimmed}</pre>\n\n"
             f"Try manually:\n"
