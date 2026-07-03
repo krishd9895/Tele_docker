@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     DUCKDNS_DOMAIN: str | None = None
     DUCKDNS_UPDATE_INTERVAL: int = 300
     GIT_SCAN_PATHS: str | None = None
+    CF_TUNNEL_TOKEN: str | None = None   # Cloudflare named tunnel token for permanent URLs
 
     class Config:
         env_file = ".env"

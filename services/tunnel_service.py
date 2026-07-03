@@ -42,38 +42,68 @@ CLOUDFLARED_INSTALL_FALLBACK = (
     'cloudflared --version 2>&1'
 )
 
-# Auth proxy script written to host and run with Python 3
-_AUTH_PROXY_SCRIPT = '''
-import sys, base64, asyncio
-from aiohttp import web, ClientSession
+# Auth proxy script — written via SFTP then run on host
+# Uses only stdlib (http.server) so no pip install needed on host
+_AUTH_PROXY_SCRIPT = r'''#!/usr/bin/env python3
+"""Minimal HTTP Basic Auth reverse proxy using only stdlib."""
+import sys
+import base64
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.request import urlopen, Request
+from urllib.error import URLError
 
 USERNAME = sys.argv[1]
 PASSWORD = sys.argv[2]
 PROXY_PORT = int(sys.argv[3])
-BACKEND = sys.argv[4]
-EXPECTED = base64.b64encode(f"{USERNAME}:{PASSWORD}".encode()).decode()
+BACKEND = sys.argv[4].rstrip("/")
+EXPECTED = "Basic " + base64.b64encode(f"{USERNAME}:{PASSWORD}".encode()).decode()
 
-async def handle(request):
-    auth = request.headers.get("Authorization", "")
-    if not auth.startswith("Basic ") or auth[6:] != EXPECTED:
-        return web.Response(
-            status=401,
-            headers={"WWW-Authenticate": "Basic realm=\\"Protected\\""},
-            text="Unauthorized"
-        )
-    async with ClientSession() as session:
-        url = BACKEND.rstrip("/") + str(request.rel_url)
-        async with session.request(
-            request.method, url,
-            headers={k: v for k, v in request.headers.items() if k.lower() != "host"},
-            data=await request.read()
-        ) as resp:
-            body = await resp.read()
-            return web.Response(status=resp.status, headers=dict(resp.headers), body=body)
+class AuthProxy(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):
+        pass  # silence access log
 
-app = web.Application()
-app.router.add_route("*", "/{path_info:.*}", handle)
-web.run_app(app, host="127.0.0.1", port=PROXY_PORT, print=None)
+    def _send_401(self):
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="Protected"')
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"Unauthorized")
+
+    def do_request(self):
+        auth = self.headers.get("Authorization", "")
+        if auth != EXPECTED:
+            self._send_401()
+            return
+
+        url = BACKEND + self.path
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length) if length else None
+
+        # Build forwarded headers (skip hop-by-hop)
+        skip = {"host", "connection", "keep-alive", "transfer-encoding",
+                "te", "trailer", "upgrade", "proxy-authorization"}
+        fwd_headers = {k: v for k, v in self.headers.items()
+                       if k.lower() not in skip}
+
+        try:
+            req = Request(url, data=body, headers=fwd_headers, method=self.command)
+            with urlopen(req, timeout=30) as resp:
+                self.send_response(resp.status)
+                for k, v in resp.headers.items():
+                    if k.lower() not in {"transfer-encoding", "connection"}:
+                        self.send_header(k, v)
+                self.end_headers()
+                self.wfile.write(resp.read())
+        except URLError as e:
+            self.send_response(502)
+            self.end_headers()
+            self.wfile.write(str(e).encode())
+
+    do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = do_request
+
+server = HTTPServer(("127.0.0.1", PROXY_PORT), AuthProxy)
+server.serve_forever()
 '''
 
 
@@ -155,24 +185,22 @@ class TunnelEngine:
         self, backend: str, username: str, password: str
     ) -> tuple[int | None, str]:
         """
-        Write the proxy script to the host and start it as a background process.
-        Returns (proxy_port, pid_str) or (None, error).
+        Write the proxy script to the host via SFTP and start it.
+        Credentials passed as positional args (stdlib only, no pip needed).
+        Returns (proxy_port, pid_str) or (None, error_message).
         """
         script_path = "/tmp/tele_auth_proxy.py"
 
-        # Write script via SSH
-        escaped = _AUTH_PROXY_SCRIPT.replace('"', '\\"').replace('\n', '\\n')
-        write_cmd = f'printf "%s" "{escaped}" > {script_path}'
-        # Use heredoc approach — safer for multiline
+        # Write script file via SFTP
         def _write_script():
-            ssh_user = os.getenv("HOST_SSH_USER")
-            ssh_pass = os.getenv("HOST_SSH_PASSWORD")
-            import paramiko as _pm
+            import io, paramiko as _pm
             ssh = _pm.SSHClient()
             ssh.set_missing_host_key_policy(_pm.AutoAddPolicy())
-            ssh.connect("127.0.0.1", username=ssh_user, password=ssh_pass, timeout=15)
+            ssh.connect("127.0.0.1",
+                        username=os.getenv("HOST_SSH_USER"),
+                        password=os.getenv("HOST_SSH_PASSWORD"),
+                        timeout=15)
             sftp = ssh.open_sftp()
-            import io
             sftp.putfo(io.BytesIO(_AUTH_PROXY_SCRIPT.encode()), script_path)
             sftp.close()
             ssh.close()
@@ -182,25 +210,45 @@ class TunnelEngine:
         except Exception as e:
             return None, f"Could not write proxy script: {e}"
 
-        # Find free port
+        # Find a free port on the host
         port = await asyncio.to_thread(_find_free_port_on_host)
         if not port:
             return None, "Could not find a free port on host"
 
-        # Start proxy in background, capture PID
+        # Escape credentials for shell — wrap in single quotes, escape single quotes
+        def _sh_escape(s: str) -> str:
+            return "'" + s.replace("'", "'\\''") + "'"
+
+        u = _sh_escape(username)
+        p = _sh_escape(password)
+        b = _sh_escape(backend)
+
         start_cmd = (
-            f'nohup python3 {script_path} '
-            f'"{username}" "{password}" {port} "{backend}" '
+            f'nohup python3 {script_path} {u} {p} {port} {b} '
             f'> /tmp/tele_proxy_{port}.log 2>&1 & echo $!'
         )
-        code, out = await asyncio.to_thread(_ssh_exec, start_cmd, timeout=10)
+        code, out = await asyncio.to_thread(_ssh_exec, start_cmd, 10)
         if code != 0:
             return None, f"Could not start proxy: {out}"
 
         pid = out.strip()
-        # Give it a moment to start
-        await asyncio.sleep(1.5)
-        return port, pid
+
+        # Verify proxy is actually listening (up to 3 seconds)
+        for _ in range(6):
+            await asyncio.sleep(0.5)
+            check_code, _ = await asyncio.to_thread(
+                _ssh_exec,
+                f"ss -tlnp 2>/dev/null | grep '127.0.0.1:{port}' || "
+                f"netstat -tlnp 2>/dev/null | grep ':{port}'",
+                5
+            )
+            if check_code == 0:
+                logger.info(f"Auth proxy verified listening on :{port} (pid {pid})")
+                return port, pid
+
+        # Check proxy log for errors
+        _, log = await asyncio.to_thread(_ssh_exec, f"cat /tmp/tele_proxy_{port}.log 2>/dev/null", 5)
+        return None, f"Proxy started (pid {pid}) but not listening on :{port}.\nLog: {log[:300]}"
 
     # ── Create tunnel ─────────────────────────────────────────────────────────
 
@@ -222,6 +270,7 @@ class TunnelEngine:
         proxy_pid = None
 
         # Start auth proxy if needed
+        target_for_tunnel = target  # default: point cloudflared straight at the service
         if has_auth:
             proxy_port, proxy_pid_or_err = await self._start_auth_proxy(
                 target, auth_user, auth_pass
@@ -233,8 +282,6 @@ class TunnelEngine:
                 proxy_pid = proxy_pid_or_err
                 target_for_tunnel = f"http://127.0.0.1:{proxy_port}"
                 logger.info(f"Auth proxy started on :{proxy_port} (pid {proxy_pid})")
-        
-        target_for_tunnel = f"http://127.0.0.1:{proxy_port}" if proxy_port else target
 
         cmd = f'cloudflared tunnel --url {target_for_tunnel} --no-autoupdate 2>&1'
         logger.info(f"Launching cloudflared [{tunnel_id}] → {target_for_tunnel}")

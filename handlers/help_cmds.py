@@ -131,52 +131,46 @@ the bot runs <code>docker compose</code> via SSH automatically."""
         "🌐 Tunnels",
         """🌐 <b>Public Tunnel Management</b>
 
-Expose any local port as a public HTTPS URL instantly.
-Uses <b>cloudflared</b> (Cloudflare's free tunnel tool).
-No account, no config, no open ports needed.
-All commands <b>require 2FA</b>.
+Two modes — both use cloudflared, no port forwarding needed.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
-<b>How it works</b>
+<b>/expose</b>  — Temporary (no account)
 
-cloudflared creates a secure outbound tunnel from your
-WSL host to Cloudflare's network. You get a public URL
-like <code>https://abc-123.trycloudflare.com</code> instantly.
+Random URL like <code>abc-xyz.trycloudflare.com</code>
+Changes every time you run it. Good for testing.
 
-No account needed. Free. Works behind any firewall or NAT.
-
-━━━━━━━━━━━━━━━━━━━━━━━━
-<b>/expose</b>
-Full wizard — installs cloudflared automatically on first use:
-
-<b>Step 1</b> — Enter local port or URL:
-<code>8080</code>  or  <code>http://localhost:3000</code>
-
-<b>Step 2</b> — Health check:
-Bot pings your service. Aborts if unreachable.
-
-<b>Step 3</b> — Basic Auth (tap button):
-• 🔒 Yes → enter username + password (password deleted immediately)
-• 🔓 No → open access
-
-<b>Step 4</b> — Tunnel launches.
-Bot returns public HTTPS URL + tunnel ID.
+Wizard steps:
+1. Enter port: <code>8080</code>
+2. Health check (auto)
+3. Basic auth? Yes/No
+4. URL ready
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
-<b>/expose_setup</b>
-Manually install cloudflared on your WSL host.
-Not needed — /expose auto-installs on first use.
-Use this only if auto-install fails.
+<b>/expose_perm</b>  — Permanent (free CF account)
+
+Fixed URL like <code>myapp.yourdomain.com</code>
+Never changes. Survives restarts.
+
+<b>One-time setup (from phone):</b>
+1. Tap /expose_perm → 📋 How to get a token
+2. Open <code>cloudflare.com</code> → Sign up free
+3. Dashboard → Zero Trust → Networks → Tunnels
+4. Create tunnel → Cloudflared → name it
+5. Copy the token from the install command
+6. In tunnel settings → Public Hostname → Add:
+   • Subdomain: <code>myapp</code>
+   • Domain: your domain (or <code>workers.dev</code>)
+   • Service: <code>http://localhost:8080</code>
+7. Back in bot → /expose_perm → Enter token
+8. ✅ Permanent URL active — saved for future restarts
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 <b>/tunnel_status</b>
-Shows all active tunnels + DuckDNS IP status.
+Active tunnels (⏱ temp / ♾️ permanent) + DuckDNS IP
 
-━━━━━━━━━━━━━━━━━━━━━━━━
-<b>/revoke &lt;id&gt;</b>
-Kill a tunnel — URL goes dead immediately.
-No arg → shows active tunnels as tap-able buttons.
-<code>/revoke a1b2c3</code>"""
+<b>/revoke &lt;id&gt;</b> — stop one tunnel
+<b>/revoke_all</b> — kill everything (use after restart to
+clean up old orphaned processes)"""
     ),
     (
         "duckdns",
