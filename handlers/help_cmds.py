@@ -7,7 +7,8 @@ Sections navigated via inline buttons (no typing needed on mobile):
   3. 🐳 Compose Stack Controls
   4. 🌐 Tunnels (cloudflared)
   5. 🦆 DuckDNS
-  6. 🖥️ Host Bridge (/host)
+  6. ⚙️ .env Settings
+  7. 🖥️ Host Bridge (/host)
 """
 
 from aiogram import Router, F
@@ -184,46 +185,84 @@ No arg → shows active tunnels as tap-able buttons.
 
 Keeps your <code>yourname.duckdns.org</code> subdomain
 always pointing at your current public IP.
-Fully configurable from the bot — no .env editing needed.
+Fully configurable from the bot — no manual .env editing needed.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
-<b>/duckdns</b>
-Opens the DuckDNS control panel with buttons:
+<b>/duckdns</b> — control panel:
 
-• <b>🔍 Status</b> — shows domain, registered IP, live IP,
-  last update time, and whether IPs match
-• <b>🔄 Update IP Now</b> — force-push current IP immediately
-• <b>▶ Start Auto-Update</b> — start background updater
-• <b>⏹ Stop Auto-Update</b> — pause background updater
-• <b>⚙️ Configure Token & Domain</b> — set up from scratch
+• <b>🔍 Status</b> — domain, registered IP, live IP,
+  mismatch warning if they differ
+• <b>🔄 Update IP Now</b> — force push immediately
+• <b>▶/⏹ Auto-Update</b> — start or stop background updater
+• <b>⚙️ Configure</b> — set token and domain interactively
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 <b>First-time setup from phone:</b>
 
-1. Go to <code>duckdns.org</code> and log in
+1. Open <code>duckdns.org</code> and log in
 2. Copy your token (top of the page)
-3. Note your subdomain (e.g. <code>kyone</code>)
-4. Open /duckdns → tap ⚙️ Configure
-5. Paste token → enter subdomain
-6. Bot tests the connection and starts auto-update
+3. Open /duckdns → tap ⚙️ Configure
+4. Paste token → enter subdomain (e.g. <code>kyone</code>)
+5. Bot tests the connection, saves to <code>.env</code>,
+   and starts auto-update — all automatically
 
-✅ Done — no .env editing needed during setup.
-   Bot applies settings immediately in memory.
-
-━━━━━━━━━━━━━━━━━━━━━━━━
-<b>To make settings permanent</b> (survive bot restart):
-Add to your <code>.env</code> file:
-<code>DUCKDNS_TOKEN=your-token</code>
-<code>DUCKDNS_DOMAIN=yoursubdomain</code>
-<code>DUCKDNS_UPDATE_INTERVAL=300</code>
-
-The bot reminds you to do this after successful setup.
+✅ No manual file editing needed.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
-<b>How auto-update works:</b>
-Every 5 minutes the bot checks your public IP.
-• Changed → pushes update to DuckDNS API
-• Same → skips silently"""
+<b>Auto-update interval</b>
+Default: every 5 minutes.
+Change with: <code>/setenv DUCKDNS_UPDATE_INTERVAL 600</code>"""
+    ),
+    (
+        "env",
+        "⚙️ .env Settings",
+        """⚙️ <b>Settings Management</b>
+
+View and update bot configuration from Telegram.
+Both commands <b>require 2FA</b>.
+
+━━━━━━━━━━━━━━━━━━━━━━━━
+<b>How it works (secure design)</b>
+
+<code>.env</code> is mounted <b>read-only</b> — the bot can
+never modify tokens or passwords.
+
+Mutable settings (DuckDNS, scan paths, timeouts)
+are stored in:
+• ☁️ <b>MongoDB</b> — if MONGO_URI is set
+• 📄 <b>data/settings.json</b> — always available as fallback
+
+On restart, .env loads first, then the store overlays.
+So settings saved via /setenv survive restarts automatically.
+
+━━━━━━━━━━━━━━━━━━━━━━━━
+<b>/showenv</b>
+Shows all settings with source badges:
+• 🔒 = from .env (read-only)
+• ☁️ = saved in MongoDB
+• 📄 = saved in settings.json
+Sensitive values are always masked.
+
+━━━━━━━━━━━━━━━━━━━━━━━━
+<b>/setenv &lt;KEY&gt; &lt;value&gt;</b>
+Save a mutable setting. Applied immediately to runtime.
+No restart needed for most settings.
+
+<i>Examples:</i>
+<code>/setenv GIT_SCAN_PATHS /home/d</code>
+<code>/setenv DUCKDNS_UPDATE_INTERVAL 600</code>
+<code>/setenv DEPLOYMENT_TIMEOUT 900</code>
+
+━━━━━━━━━━━━━━━━━━━━━━━━
+<b>Blocked (sensitive — .env only):</b>
+<code>TELEGRAM_BOT_TOKEN</code>, <code>TOTP_SECRET</code>,
+<code>HOST_SSH_PASSWORD</code>, <code>DUCKDNS_TOKEN</code>,
+<code>ALLOWED_USER_ID</code>, <code>MONGO_URI</code>
+
+━━━━━━━━━━━━━━━━━━━━━━━━
+<b>MongoDB (optional)</b>
+Set <code>MONGO_URI</code> in .env for cloud-synced settings.
+Without it, <code>data/settings.json</code> is used automatically."""
     ),
     (
         "host",

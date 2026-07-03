@@ -19,6 +19,7 @@ from handlers.auth_cmds import auth_router
 from handlers.help_cmds import help_router
 from handlers.tunnel_cmds import tunnel_router
 from handlers.duckdns_cmds import duckdns_router
+from handlers.env_cmds import env_router
 from services.duckdns_service import duckdns_service
 
 from utils.watchdog import ResiliencyWatchdogEngine
@@ -55,6 +56,13 @@ def execute_on_host_machine(command: str) -> str:
 async def main():
     logging.info("Validating configuration matrices and initializing SQLite metadata layers...")
     init_db()
+
+    # Load and apply mutable settings from MongoDB or settings.json
+    from utils.env_manager import load_mutable_settings, apply_to_runtime
+    mutable = load_mutable_settings()
+    if mutable:
+        apply_to_runtime(mutable)
+        logging.info(f"Applied {len(mutable)} mutable settings from persistent store.")
 
     # Start DuckDNS auto-updater if configured
     if runtime_settings.DUCKDNS_TOKEN and runtime_settings.DUCKDNS_DOMAIN:
@@ -108,6 +116,7 @@ async def main():
     dp.include_router(file_router)
     dp.include_router(tunnel_router)
     dp.include_router(duckdns_router)
+    dp.include_router(env_router)
     dp.include_router(help_router)
 
     sentinel = ResiliencyWatchdogEngine(bot, runtime_settings.ALLOWED_USER_ID)

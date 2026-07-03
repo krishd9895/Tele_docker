@@ -21,6 +21,7 @@ from services.duckdns_service import duckdns_service
 from config.settings import runtime_settings
 from middlewares.totp_auth import require_2fa
 from utils.msg_cleaner import delete_after, delete_command
+from utils.env_manager import save_settings, mask_value
 
 duckdns_router = Router()
 
@@ -240,26 +241,32 @@ async def dd_got_domain(message: Message, state: FSMContext):
     success, result = await duckdns_service.update_ip()
 
     if success:
+        # Persist to MongoDB or settings.json (not .env — it's read-only)
+        saved_ok, backend = save_settings({
+            "DUCKDNS_TOKEN":  token,
+            "DUCKDNS_DOMAIN": domain,
+        })
+
+        if saved_ok:
+            backend_label = "☁️ MongoDB" if backend == "mongodb" else "📄 settings.json"
+            saved_note = f"✅ Saved to {backend_label} — persists after restart."
+        else:
+            saved_note = "⚠️ Could not persist settings. Will reset on restart."
+
         await status.edit_text(
-            f"✅ <b>DuckDNS Configured Successfully</b>\n\n"
+            f"✅ <b>DuckDNS Configured</b>\n\n"
             f"<b>Domain:</b> <code>{domain}.duckdns.org</code>\n"
             f"<b>IP:</b> <code>{result}</code>\n\n"
-            f"Auto-update is now running every "
-            f"{runtime_settings.DUCKDNS_UPDATE_INTERVAL // 60} minutes.\n\n"
-            f"⚠️ <b>Important:</b> Add these to your <code>.env</code> file to persist\n"
-            f"after a bot restart:\n"
-            f"<code>DUCKDNS_TOKEN={token[:6]}...{token[-4:]}</code>\n"
-            f"<code>DUCKDNS_DOMAIN={domain}</code>",
+            f"{saved_note}",
             parse_mode="HTML"
         )
-        # Start auto-updater with new credentials
         await duckdns_service.start_auto_updater(runtime_settings.DUCKDNS_UPDATE_INTERVAL)
-        await delete_after(status, delay=60)
+        await delete_after(status, delay=30)
     else:
         await status.edit_text(
             f"❌ <b>DuckDNS Test Failed</b>\n\n"
             f"<code>{result}</code>\n\n"
-            "Check your token is correct and try /duckdns → Configure again.",
+            "Check your token and try /duckdns → Configure again.",
             parse_mode="HTML"
         )
         await delete_after(status, delay=20)

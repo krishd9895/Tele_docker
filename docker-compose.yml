@@ -15,6 +15,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./data:/app/data
+      - ./.env:/app/.env:ro
     environment:
       # ── Core ──────────────────────────────────────────────────────────────
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
