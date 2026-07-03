@@ -333,6 +333,7 @@ async def cmd_expose_perm(message: Message, state: FSMContext):
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="▶ Start saved tunnel", callback_data="cfperm:start")],
             [InlineKeyboardButton(text="🔑 Use different token", callback_data="cfperm:token")],
+            [InlineKeyboardButton(text="🗑 Clear saved token", callback_data="cfperm:clear")],
             [InlineKeyboardButton(text="📋 Setup guide", callback_data="cfperm:guide")],
         ])
 
@@ -441,6 +442,19 @@ async def cb_cf_start_saved(call: CallbackQuery):
     await _start_perm_tunnel(call.message, token)
 
 
+@tunnel_router.callback_query(F.data == "cfperm:clear")
+async def cb_cf_clear_token(call: CallbackQuery):
+    await call.answer()
+    from utils.env_manager import save_setting
+    save_setting("CF_TUNNEL_TOKEN", "")
+    runtime_settings.__dict__["CF_TUNNEL_TOKEN"] = None
+    await call.message.answer(
+        "🗑 <b>Saved token cleared.</b>\n\n"
+        "Tap /expose_perm → <b>🔑 I have a token</b> to enter a fresh one.",
+        parse_mode="HTML"
+    )
+
+
 @tunnel_router.message(PermExposeStates.waiting_for_token)
 async def perm_got_token(message: Message, state: FSMContext):
     token = message.text.strip()
@@ -467,32 +481,42 @@ async def _start_perm_tunnel(message: Message, token: str):
         parse_mode="HTML"
     )
 
-    tunnel_id = await asyncio.to_thread(
+    # Kill any existing cloudflared tunnel processes first
+    await asyncio.to_thread(
         _ssh_exec,
-        f"pkill -f 'cloudflared.*tunnel.*run' 2>/dev/null; echo ok",
-        10
+        "pkill -f 'cloudflared.*tunnel.*run' 2>/dev/null; pkill -f 'cloudflared.*run' 2>/dev/null; sleep 1; echo ok",
+        15
     )
 
-    # Start permanent tunnel — token contains all routing config set in CF dashboard
+    # Check cloudflared version to pick correct syntax
+    _, ver_out = await asyncio.to_thread(_ssh_exec, "cloudflared --version 2>&1", 10)
+    logger.info(f"cloudflared version: {ver_out}")
+
+    # Quote the token safely — tokens contain +, /, = chars
+    safe_token = token.replace("'", "'\\''")
+
+    # Try the correct syntax for remotely-managed tunnels:
+    # cloudflared service/tunnel run --token <token>
+    # Note: --no-autoupdate is a global flag and goes BEFORE 'tunnel'
     start_cmd = (
-        f'nohup cloudflared tunnel run --token {token} '
-        f'--no-autoupdate > /tmp/cf_perm_tunnel.log 2>&1 & echo $!'
+        f"nohup cloudflared tunnel run --token '{safe_token}' "
+        f"> /tmp/cf_perm_tunnel.log 2>&1 & echo $!"
     )
     code, pid_out = await asyncio.to_thread(_ssh_exec, start_cmd, 15)
 
     if code != 0:
         await status.edit_text(
-            f"❌ <b>Failed to start tunnel</b>\n\n<code>{pid_out}</code>",
+            f"❌ <b>Failed to start tunnel</b>\n\n<code>{pid_out[:500]}</code>",
             parse_mode="HTML"
         )
         return
 
     pid = pid_out.strip()
 
-    # Wait a moment then check logs for confirmation
-    await asyncio.sleep(4)
+    # Wait for tunnel to connect and check logs
+    await asyncio.sleep(6)
     _, log_out = await asyncio.to_thread(
-        _ssh_exec, "tail -20 /tmp/cf_perm_tunnel.log 2>/dev/null", 10
+        _ssh_exec, "tail -30 /tmp/cf_perm_tunnel.log 2>/dev/null", 10
     )
 
     # Store in tunnel registry
@@ -512,18 +536,23 @@ async def _start_perm_tunnel(message: Message, token: str):
         "permanent":   True,
     }
 
-    # Check if tunnel connected
-    connected = "registered" in log_out.lower() or "connected" in log_out.lower()
+    # Various success keywords across cloudflared versions
+    connected = any(kw in log_out.lower() for kw in [
+        "registered tunnel", "connected to", "connection established",
+        "tunnelid", "conntrackerid", "serve", "start server", "tunnel connection"
+    ])
     status_icon = "✅" if connected else "⏳"
+    log_trimmed = log_out[-1200:] if len(log_out) > 1200 else log_out
 
     await status.edit_text(
-        f"{status_icon} <b>Permanent Tunnel {'Running' if connected else 'Starting'}</b>\n\n"
-        f"<b>PID:</b> <code>{pid}</code>\n"
-        f"<b>URL:</b> Defined in Cloudflare Dashboard\n"
-        f"   Zero Trust → Networks → Tunnels → Public Hostnames\n\n"
-        f"<b>Recent log:</b>\n<pre>{log_out[-800:]}</pre>\n\n"
-        f"The tunnel runs permanently on your host.\n"
-        f"Use /revoke_all to stop it.",
+        f"{status_icon} <b>Permanent Tunnel {'Running' if connected else 'Starting...'}</b>\n\n"
+        f"<b>cloudflared:</b> <code>{ver_out[:60]}</code>\n"
+        f"<b>PID:</b> <code>{pid}</code>\n\n"
+        f"<b>Public URL:</b> Set in Cloudflare Dashboard\n"
+        f"Zero Trust → Networks → Tunnels → <b>Public Hostnames</b>\n\n"
+        f"<b>Log:</b>\n<pre>{log_trimmed}</pre>\n\n"
+        + ("✅ Tunnel is connected and serving traffic." if connected else
+           "⏳ If log shows help text or errors, tap /expose_perm → Use different token to re-enter your token."),
         parse_mode="HTML"
     )
 
