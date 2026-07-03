@@ -39,20 +39,6 @@ services:
       - DUCKDNS_DOMAIN=${DUCKDNS_DOMAIN:-}
       - DUCKDNS_UPDATE_INTERVAL=${DUCKDNS_UPDATE_INTERVAL:-300}
 
-      # ── zrok2 ─────────────────────────────────────────────────────────────
-      - ZROK_BINARY=${ZROK_BINARY:-zrok2}
-      - ZROK_PRIVATE_TOKEN=${ZROK_PRIVATE_TOKEN:-}
-      - ZROK_API_ENDPOINT=${ZROK_API_ENDPOINT:-http://127.0.0.1:18080}
-      - ZROK_ACCOUNT_EMAIL=${ZROK_ACCOUNT_EMAIL:-admin@tele.local}
-      - ZROK_ACCOUNT_PASSWORD=${ZROK_ACCOUNT_PASSWORD:-changeme123}
-
-      # ── zrok2 Bootstrap (optional — only used by /zrok_bootstrap command) ─
-      - ZROK2_DNS_ZONE=${ZROK2_DNS_ZONE:-}
-      - ZITI_ADMIN_PASSWORD=${ZITI_ADMIN_PASSWORD:-}
-      - ZITI_API_ENDPOINT=${ZITI_API_ENDPOINT:-https://127.0.0.1:1280}
-      - ZROK2_TLS_CERT=${ZROK2_TLS_CERT:-}
-      - ZROK2_TLS_KEY=${ZROK2_TLS_KEY:-}
-
     logging:
       driver: "json-file"
       options:

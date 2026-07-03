@@ -5,7 +5,7 @@ Sections navigated via inline buttons (no typing needed on mobile):
   1. 🔐 2FA Authentication
   2. 🐙 Git Operations
   3. 🐳 Compose Stack Controls
-  4. 🌐 Zrok Tunnels
+  4. 🌐 Tunnels (cloudflared)
   5. 🦆 DuckDNS
   6. 🖥️ Host Bridge (/host)
 """
@@ -17,9 +17,6 @@ from utils.msg_cleaner import delete_command
 
 help_router = Router()
 
-# ── Section definitions ───────────────────────────────────────────────────────
-# Each entry: (callback_id, menu_label, full_text)
-
 SECTIONS = [
     (
         "2fa",
@@ -27,39 +24,31 @@ SECTIONS = [
         """🔐 <b>2FA Authentication</b>
 
 Some commands are protected by Google Authenticator (TOTP).
-You must verify once every <b>2 hours</b> before using them.
+Verify once and get <b>2 hours</b> of elevated access.
 
 <b>Protected commands:</b>
-<code>/shell</code>, <code>/compose_up</code>, <code>/compose_down</code>, <code>/host</code>, <code>/expose</code>, <code>/revoke</code>, <code>/tunnel_status</code>, <code>/zrok_setup</code>
+<code>/shell</code>, <code>/compose_up</code>, <code>/compose_down</code>, <code>/host</code>
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 <b>/verify &lt;code&gt;</b>
-Authenticate using your 6-digit Google Authenticator code.
+Authenticate with your 6-digit Google Authenticator code.
 Your message is <b>deleted immediately</b> for security.
 
-<i>Example:</i>
-<code>/verify 482910</code>
-
-After success → elevated access for 2 hours.
+<i>Example:</i> <code>/verify 482910</code>
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 <b>/2fa_status</b>
-Shows how much time is left on your current session.
+Shows time remaining on your current session.
 
-<i>Example output:</i>
-🟢 Session Active — Time remaining: <code>1h 42m 8s</code>
-
-━━━━━━━━━━━━━━━━━━━━━━━━
 <b>/lock</b>
-Manually revoke your 2FA session immediately.
-Use this when you're done with elevated commands.
+Revoke your 2FA session immediately.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 <b>First-time setup:</b>
 1. Open Google Authenticator on your phone
 2. Add account → Enter a setup key manually
 3. Account name: <code>TeleDocker</code>
-4. Key: <i>(the TOTP_SECRET value from your .env)</i>
+4. Key: <i>(your TOTP_SECRET value from .env)</i>
 5. Type: Time-based → Done"""
     ),
     (
@@ -67,40 +56,40 @@ Use this when you're done with elevated commands.
         "🐙 Git Ops",
         """🐙 <b>Git Operations</b>
 
-Clone and update repositories directly on your WSL machine
+Clone and update repositories on your WSL machine
 from Telegram — no terminal needed.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 <b>/gitclone &lt;url&gt; [path]</b>
 Clone a Git repository to your WSL machine.
 
-<code>path</code> is optional — if omitted, clones to
-<code>data/workspaces/&lt;repo-name&gt;</code>
+Path is optional — defaults to <code>data/workspaces/&lt;repo-name&gt;</code>
 
 <i>Examples:</i>
 <code>/gitclone https://github.com/user/myapp</code>
-<code>/gitclone https://github.com/user/myapp /home/user/projects/myapp</code>
+<code>/gitclone https://github.com/user/myapp /home/d/myapp</code>
 
-Supports:
 • Public repos — works directly
-• Private repos — bot will ask for your GitHub PAT token
-  (the token message is deleted immediately after use)
+• Private repos — bot asks for your GitHub PAT token
+  (deleted immediately after use)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 <b>/gitpull</b>
 Pull latest changes from origin.
 
-<b>No argument:</b> Shows a list of all repos in
-<code>data/workspaces/</code> as tap-able buttons.
-Tap one → bot pulls it immediately.
+<b>No argument:</b> Shows all repos as tap-able buttons.
+Scans both <code>data/workspaces/</code> (container) and
+<code>GIT_SCAN_PATHS</code> on your WSL host via SSH.
 
-<b>With path:</b> Pull a specific repo by path.
-<code>/gitpull /home/user/projects/myapp</code>
+Each repo shows a 🐳 (container) or 🖥️ (host) badge.
 
-<i>What it shows per repo:</i>
-• Repo name
-• Remote URL (tokens stripped from display)
-• Local path"""
+<b>With path:</b> <code>/gitpull /home/d/myapp</code>
+
+━━━━━━━━━━━━━━━━━━━━━━━━
+<b>GIT_SCAN_PATHS in .env</b>
+Comma-separated WSL paths the bot scans for git repos:
+<code>GIT_SCAN_PATHS=/home/d</code>
+<code>GIT_SCAN_PATHS=/home/d,/home/d/bots</code>"""
     ),
     (
         "compose",
@@ -114,81 +103,79 @@ Both commands <b>require 2FA</b> — run /verify first.
 <b>/compose_up</b>
 Runs <code>docker compose up -d</code> on a project.
 
-<b>No argument:</b> Scans <code>data/workspaces/</code> for
-folders containing a compose file and shows them as
-tap-able buttons. Tap one → stack comes up.
+<b>No argument:</b> Shows all detected compose projects
+as tap-able buttons. Scans both container workspace
+and WSL host paths (via <code>GIT_SCAN_PATHS</code>).
 
-<b>With path:</b> Target a specific folder directly.
-<code>/compose_up /home/user/projects/myapp</code>
+Each project shows a 🐳 (container) or 🖥️ (host) badge.
 
-Auto-detects the compose file name:
-<code>docker-compose.yml</code> / <code>docker-compose.yaml</code> /
-<code>compose.yaml</code> / <code>compose.yml</code>
+<b>With path:</b> <code>/compose_up /home/d/myapp</code>
+
+Auto-detects: <code>docker-compose.yml</code> / <code>compose.yaml</code> etc.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 <b>/compose_down</b>
 Runs <code>docker compose down</code> on a project.
 
-Same usage as /compose_up — button picker or direct path.
-<code>/compose_down /home/user/projects/myapp</code>
+Same usage — button picker or direct path.
+<code>/compose_down /home/d/myapp</code>
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
-<b>Output:</b>
-Both commands show the full compose output in the reply
-(last 3000 characters if very long)."""
+<b>Host projects:</b>
+For projects on your WSL host (not inside the container),
+the bot runs <code>docker compose</code> via SSH automatically."""
     ),
     (
-        "zrok",
-        "🌐 Zrok Tunnels",
-        """🌐 <b>Zrok2 Tunnel Management</b>
+        "tunnels",
+        "🌐 Tunnels",
+        """🌐 <b>Public Tunnel Management</b>
 
-Expose any local port as a public HTTPS URL.
-Uses your self-hosted <b>zrok2</b> instance running as
-systemd services on WSL Ubuntu.
-All tunnel commands <b>require 2FA</b>.
-
-━━━━━━━━━━━━━━━━━━━━━━━━
-<b>Prerequisites (one-time server setup)</b>
-
-zrok2 runs as Linux systemd services — not Docker.
-Install on your WSL host:
-<code>sudo apt install zrok2 zrok2-controller zrok2-frontend</code>
-
-Bootstrap (generates admin token):
-<code>export ZROK2_ADMIN_TOKEN="$(head -c24 /dev/urandom | base64 -w0)"
-sudo -E /usr/share/zrok/nfpm/zrok2-bootstrap.bash</code>
-
-Save the <code>ZROK2_ADMIN_TOKEN</code> value into .env:
-<code>ZROK_PRIVATE_TOKEN=that_value</code>
-<code>ZROK_API_ENDPOINT=http://127.0.0.1:18080</code>
+Expose any local port as a public HTTPS URL instantly.
+Uses <b>cloudflared</b> (Cloudflare's free tunnel tool).
+No account, no config, no open ports needed.
+All commands <b>require 2FA</b>.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
-<b>/zrok_install_local</b>  ← if apt fails
-1. Copy <code>zrok_x.x.x_linux_amd64.tar.gz</code>
-   into <code>/home/d/Tele_docker/</code> via SSH/WinSCP
-2. Run /zrok_install_local — bot installs automatically
+<b>How it works</b>
+
+cloudflared creates a secure outbound tunnel from your
+WSL host to Cloudflare's network. You get a public URL
+like <code>https://abc-123.trycloudflare.com</code> instantly.
+
+No account needed. Free. Works behind any firewall or NAT.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
-<b>/zrok_setup</b>  — button panel:
-• <b>🔍 Check Status</b> — binary installed? enrolled?
-  Also shows zrok2-controller systemd service state
-• <b>📥 Install zrok</b> — tries apt, then local file
-• <b>🔑 Enroll Account</b> — auto-creates account using
-  ZROK_PRIVATE_TOKEN (admin token) + email/password
-• <b>🦆 Update DuckDNS</b> — push current IP
+<b>/expose</b>
+Full wizard — installs cloudflared automatically on first use:
+
+<b>Step 1</b> — Enter local port or URL:
+<code>8080</code>  or  <code>http://localhost:3000</code>
+
+<b>Step 2</b> — Health check:
+Bot pings your service. Aborts if unreachable.
+
+<b>Step 3</b> — Basic Auth (tap button):
+• 🔒 Yes → enter username + password (password deleted immediately)
+• 🔓 No → open access
+
+<b>Step 4</b> — Tunnel launches.
+Bot returns public HTTPS URL + tunnel ID.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
-<b>/expose</b> — create a public tunnel:
-Step 1 → enter port: <code>8080</code>
-Step 2 → health check (bot pings it)
-Step 3 → basic auth yes/no
-Step 4 → tunnel launches, public URL returned
+<b>/expose_setup</b>
+Manually install cloudflared on your WSL host.
+Not needed — /expose auto-installs on first use.
+Use this only if auto-install fails.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
-<b>/tunnel_status</b> — all active tunnels + DuckDNS
+<b>/tunnel_status</b>
+Shows all active tunnels + DuckDNS IP status.
 
-<b>/revoke &lt;id&gt;</b> — kill tunnel instantly (URL → 404)
-No arg → tap-able button list"""
+━━━━━━━━━━━━━━━━━━━━━━━━
+<b>/revoke &lt;id&gt;</b>
+Kill a tunnel — URL goes dead immediately.
+No arg → shows active tunnels as tap-able buttons.
+<code>/revoke a1b2c3</code>"""
     ),
     (
         "duckdns",
@@ -196,50 +183,47 @@ No arg → tap-able button list"""
         """🦆 <b>DuckDNS Auto IP Updater</b>
 
 Keeps your <code>yourname.duckdns.org</code> subdomain
-always pointing at your current public IP address.
-Runs silently in the background — no interaction needed.
+always pointing at your current public IP.
+Fully configurable from the bot — no .env editing needed.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
-<b>Setup (one-time .env edit):</b>
+<b>/duckdns</b>
+Opens the DuckDNS control panel with buttons:
 
-<code>DUCKDNS_TOKEN=your-token-here</code>
-<code>DUCKDNS_DOMAIN=yourname</code>
+• <b>🔍 Status</b> — shows domain, registered IP, live IP,
+  last update time, and whether IPs match
+• <b>🔄 Update IP Now</b> — force-push current IP immediately
+• <b>▶ Start Auto-Update</b> — start background updater
+• <b>⏹ Stop Auto-Update</b> — pause background updater
+• <b>⚙️ Configure Token & Domain</b> — set up from scratch
+
+━━━━━━━━━━━━━━━━━━━━━━━━
+<b>First-time setup from phone:</b>
+
+1. Go to <code>duckdns.org</code> and log in
+2. Copy your token (top of the page)
+3. Note your subdomain (e.g. <code>kyone</code>)
+4. Open /duckdns → tap ⚙️ Configure
+5. Paste token → enter subdomain
+6. Bot tests the connection and starts auto-update
+
+✅ Done — no .env editing needed during setup.
+   Bot applies settings immediately in memory.
+
+━━━━━━━━━━━━━━━━━━━━━━━━
+<b>To make settings permanent</b> (survive bot restart):
+Add to your <code>.env</code> file:
+<code>DUCKDNS_TOKEN=your-token</code>
+<code>DUCKDNS_DOMAIN=yoursubdomain</code>
 <code>DUCKDNS_UPDATE_INTERVAL=300</code>
 
-• Get your token at <b>duckdns.org</b> after logging in
-• <code>DUCKDNS_DOMAIN</code> = just the subdomain part
-  e.g. <code>myserver</code> not <code>myserver.duckdns.org</code>
-• <code>UPDATE_INTERVAL</code> = seconds between checks (default 300 = 5 min)
-  IP is only pushed to DuckDNS when it actually changes.
+The bot reminds you to do this after successful setup.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
-<b>What it does:</b>
-Every 5 minutes the bot fetches your public IP from
-ipify.org / icanhazip.com (with fallbacks).
-If IP changed → pushes update to DuckDNS API.
-If IP same → skips silently.
-
-━━━━━━━━━━━━━━━━━━━━━━━━
-<b>Manual update:</b>
-Inside /zrok_setup → tap <b>🦆 Update DuckDNS</b>
-to force-push your current IP on demand.
-
-<b>Check status:</b>
-<code>/tunnel_status</code> — shows current IP, domain,
-last update time, and whether auto-update is running.
-
-━━━━━━━━━━━━━━━━━━━━━━━━
-<b>DuckDNS vs zrok — what's the difference?</b>
-
-<code>yourname.duckdns.org</code>
-→ Points at your WSL machine's public IP.
-  You decide what runs on each port.
-  Always-on, no tunnel needed.
-
-<code>abc123.share.zrok.io</code>
-→ A temporary HTTPS tunnel to one specific
-  local port, created on-demand via /expose.
-  Deleted when you /revoke it."""
+<b>How auto-update works:</b>
+Every 5 minutes the bot checks your public IP.
+• Changed → pushes update to DuckDNS API
+• Same → skips silently"""
     ),
     (
         "host",
@@ -250,56 +234,48 @@ Run shell commands directly on your <b>WSL Ubuntu host</b>
 from inside the Docker container, via SSH loopback.
 
 <b>Requires 2FA</b> — run /verify first.
-Not listed in the help menu (hidden command).
+Hidden command — not in the /help menu.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
-<b>Usage:</b>
-<code>/host &lt;any shell command&gt;</code>
+<b>Usage:</b> <code>/host &lt;any shell command&gt;</code>
 
 <i>Examples:</i>
 <code>/host whoami</code>
-<code>/host ls /home/youruser</code>
+<code>/host ls /home/d</code>
 <code>/host df -h</code>
 <code>/host free -h</code>
 <code>/host systemctl status nginx</code>
-<code>/host cat /etc/hosts</code>
 <code>/host docker ps</code>
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
-<b>/host vs /shell — key difference:</b>
+<b>/host vs /shell:</b>
 
-<code>/shell</code> → runs inside the Docker container
-  Filesystem: <code>/app/</code> (container only)
-  Processes: container's process space
+<code>/shell</code> → inside the Docker container
+  Filesystem: <code>/app/</code> only
 
-<code>/host</code> → runs on your WSL Ubuntu machine
-  Filesystem: <code>/home/youruser/</code> (full host)
-  Processes: host services, systemctl, etc.
+<code>/host</code> → your WSL Ubuntu machine
+  Filesystem: <code>/home/d/</code> and everything else
+  Can run systemctl, see all processes, etc.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 <b>Requirements:</b>
-SSH must be running on WSL:
-<code>sudo service ssh start</code>
+<code>sudo service ssh start</code> on WSL
 
-Credentials set in <code>.env</code>:
-<code>HOST_SSH_USER=youruser</code>
+In <code>.env</code>:
+<code>HOST_SSH_USER=d</code>
 <code>HOST_SSH_PASSWORD=yourpass</code>
 
-Output is trimmed to 3800 chars if very long."""
+Output trimmed to 3800 chars if very long."""
     ),
 ]
 
-# Build section index for quick lookup
 _SECTION_MAP = {s[0]: s for s in SECTIONS}
 
 
-# ── Keyboard builders ─────────────────────────────────────────────────────────
-
 def _main_menu_keyboard() -> InlineKeyboardMarkup:
-    """Two-column grid of section buttons."""
     buttons = []
     row = []
-    for i, (sid, label, _) in enumerate(SECTIONS):
+    for sid, label, _ in SECTIONS:
         row.append(InlineKeyboardButton(text=label, callback_data=f"hg:{sid}"))
         if len(row) == 2:
             buttons.append(row)
@@ -310,26 +286,23 @@ def _main_menu_keyboard() -> InlineKeyboardMarkup:
 
 
 def _section_keyboard(current_id: str) -> InlineKeyboardMarkup:
-    """Back button + prev/next navigation."""
     ids = [s[0] for s in SECTIONS]
     idx = ids.index(current_id)
-
     nav = []
     if idx > 0:
-        prev_label = SECTIONS[idx - 1][1]
-        nav.append(InlineKeyboardButton(text=f"◀ {prev_label}", callback_data=f"hg:{ids[idx-1]}"))
+        nav.append(InlineKeyboardButton(
+            text=f"◀ {SECTIONS[idx-1][1]}", callback_data=f"hg:{ids[idx-1]}"
+        ))
     if idx < len(ids) - 1:
-        next_label = SECTIONS[idx + 1][1]
-        nav.append(InlineKeyboardButton(text=f"{next_label} ▶", callback_data=f"hg:{ids[idx+1]}"))
-
+        nav.append(InlineKeyboardButton(
+            text=f"{SECTIONS[idx+1][1]} ▶", callback_data=f"hg:{ids[idx+1]}"
+        ))
     buttons = []
     if nav:
         buttons.append(nav)
     buttons.append([InlineKeyboardButton(text="📋 Back to Menu", callback_data="hg:__menu__")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-
-# ── Handlers ──────────────────────────────────────────────────────────────────
 
 @help_router.message(Command("help_guide"))
 async def cmd_help_guide(message: Message):
@@ -341,7 +314,6 @@ async def cmd_help_guide(message: Message):
         parse_mode="HTML",
         reply_markup=_main_menu_keyboard()
     )
-    # Guide stays open — user navigates it interactively, no auto-delete
 
 
 @help_router.callback_query(F.data.startswith("hg:"))

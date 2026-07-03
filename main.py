@@ -16,9 +16,9 @@ from handlers.shell import shell_router
 from handlers.project import project_router
 from handlers.file_manager import file_router
 from handlers.auth_cmds import auth_router
-from handlers.zrok_cmds import zrok_router
 from handlers.help_cmds import help_router
-from services.zrok_service import zrok_engine
+from handlers.tunnel_cmds import tunnel_router
+from handlers.duckdns_cmds import duckdns_router
 from services.duckdns_service import duckdns_service
 
 from utils.watchdog import ResiliencyWatchdogEngine
@@ -55,12 +55,6 @@ def execute_on_host_machine(command: str) -> str:
 async def main():
     logging.info("Validating configuration matrices and initializing SQLite metadata layers...")
     init_db()
-
-    # Wire zrok binary path from settings
-    zrok_engine.zrok_binary = runtime_settings.ZROK_BINARY
-
-    # Auto-enroll zrok if ZROK_PRIVATE_TOKEN is set and not yet enrolled
-    asyncio.create_task(zrok_engine.auto_enroll_if_needed())
 
     # Start DuckDNS auto-updater if configured
     if runtime_settings.DUCKDNS_TOKEN and runtime_settings.DUCKDNS_DOMAIN:
@@ -112,7 +106,8 @@ async def main():
     dp.include_router(shell_router)
     dp.include_router(project_router)
     dp.include_router(file_router)
-    dp.include_router(zrok_router)
+    dp.include_router(tunnel_router)
+    dp.include_router(duckdns_router)
     dp.include_router(help_router)
 
     sentinel = ResiliencyWatchdogEngine(bot, runtime_settings.ALLOWED_USER_ID)
