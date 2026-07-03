@@ -51,23 +51,29 @@ def _normalise_target(raw: str) -> str:
 def _tunnel_summary(tunnels: list[dict]) -> str:
     lines = []
 
-    # DuckDNS block
-    if runtime_settings.DUCKDNS_TOKEN and runtime_settings.DUCKDNS_DOMAIN:
+    # DuckDNS block — always show if configured
+    if runtime_settings.DUCKDNS_DOMAIN:
         duck = duckdns_service.get_status()
-        auto = "🟢 Active" if duck["auto_update"] else "🔴 Off"
+        domain = duck["domain"]
+        auto = "🟢 Running" if duck["auto_update"] else "🔴 Stopped"
         lines.append(
-            f"🦆 <b>DuckDNS</b>\n"
-            f"  ↳ <b>Domain:</b> <code>{duck['domain']}</code>\n"
-            f"  ↳ <b>IP:</b> <code>{duck['last_ip']}</code>\n"
+            f"🦆 <b>DuckDNS Domain</b>\n"
+            f"  ↳ <code>{domain}</code>\n"
+            f"  ↳ <b>Points to IP:</b> <code>{duck['last_ip']}</code>\n"
             f"  ↳ <b>Updated:</b> <code>{duck['last_updated']}</code>\n"
             f"  ↳ <b>Auto-update:</b> {auto}\n"
+            f"  ↳ <i>Use this for direct access (no tunnel): "
+            f"http://{domain}:&lt;port&gt;</i>\n"
         )
+    else:
+        lines.append("🦆 <b>DuckDNS:</b> Not configured — use /duckdns to set up\n")
 
     # Tunnels block
     if not tunnels:
-        lines.append("📭 <b>No active tunnels.</b>")
+        lines.append("📭 <b>No active cloudflared tunnels.</b>\n\n"
+                     "<i>Use /expose to create a temporary public HTTPS URL.</i>")
     else:
-        lines.append(f"🌐 <b>Active Tunnels ({len(tunnels)})</b>\n")
+        lines.append(f"🌐 <b>Active Tunnels ({len(tunnels)})</b> ⏱ <i>temporary URLs</i>\n")
         for t in tunnels:
             auth_badge = f"🔒 <code>{t['auth_user']}</code>" if t["auth"] else "🔓 Open"
             lines.append(
@@ -265,22 +271,20 @@ async def expose_got_password(message: Message, state: FSMContext):
 
 
 async def _launch_tunnel(message: Message, target: str, auth_user: str, auth_pass: str):
-    """
-    Launch cloudflared tunnel.
-    Note: cloudflared quick tunnels don't natively support basic auth.
-    When auth is requested we note it in the tunnel record and inform the user
-    they can use the URL with credentials in the browser or via reverse proxy.
-    """
     has_auth = bool(auth_user and auth_pass)
 
     status_msg = await message.answer(
         f"🚀 <b>Step 4/4 — Launching Tunnel</b>\n\n"
         f"Starting cloudflared for <code>{target}</code>...\n"
-        f"<i>May take up to 35 seconds.</i>",
+        + ("🔒 Setting up auth proxy...\n" if has_auth else "")
+        + "<i>May take up to 40 seconds.</i>",
         parse_mode="HTML"
     )
 
-    success, result, tunnel_id = await tunnel_engine.create_tunnel(target)
+    # Pass auth credentials — tunnel_service starts a proxy if needed
+    success, result, tunnel_id = await tunnel_engine.create_tunnel(
+        target, auth_user=auth_user, auth_pass=auth_pass
+    )
 
     if not success:
         await status_msg.edit_text(
@@ -290,32 +294,45 @@ async def _launch_tunnel(message: Message, target: str, auth_user: str, auth_pas
         )
         return
 
-    # Store auth info in record for display
-    if has_auth:
-        tunnel_engine._tunnels[tunnel_id]["auth"] = True
-        tunnel_engine._tunnels[tunnel_id]["auth_user"] = auth_user
+    # Auth status
+    tunnel_record = tunnel_engine.get_tunnel(tunnel_id)
+    auth_actually_active = tunnel_record and tunnel_record.get("auth", False)
 
-    auth_line = (
-        f"🔒 <b>Auth:</b> <code>{auth_user}</code> / <i>[password set]</i>\n"
-        f"   <i>Use credentials when accessing the URL.</i>\n"
-        if has_auth else
-        "🔓 <b>Auth:</b> Open access\n"
-    )
+    if has_auth and auth_actually_active:
+        auth_line = (
+            f"🔒 <b>Auth:</b> <code>{auth_user}</code> / <i>[password protected]</i>\n"
+            f"   Browser will show a login popup when you open the URL.\n"
+        )
+    elif has_auth and not auth_actually_active:
+        auth_line = (
+            f"⚠️ <b>Auth proxy failed</b> — tunnel is open access.\n"
+            f"   Restart /expose to retry with auth.\n"
+        )
+    else:
+        auth_line = "🔓 <b>Auth:</b> Open access\n"
 
-    duck_note = ""
+    # DuckDNS
+    duck_section = ""
     if runtime_settings.DUCKDNS_DOMAIN:
         domain = runtime_settings.DUCKDNS_DOMAIN
         if not domain.endswith(".duckdns.org"):
             domain = f"{domain}.duckdns.org"
-        duck_note = f"\n🦆 <b>DuckDNS:</b> <code>{domain}</code> → your public IP"
+        duck_ip = duckdns_service.get_status().get("last_ip", "unknown")
+        duck_section = (
+            f"\n🦆 <b>Your DuckDNS Domain:</b>\n"
+            f"   <code>{domain}</code>\n"
+            f"   Points to your public IP: <code>{duck_ip}</code>\n"
+            f"   <i>Use this for direct port access (no tunnel needed)</i>\n"
+        )
 
     await status_msg.edit_text(
         f"✅ <b>Tunnel Active</b>\n\n"
         f"🆔 <b>ID:</b> <code>{tunnel_id}</code>\n"
         f"🏠 <b>Local:</b> <code>{target}</code>\n"
         f"🌐 <b>Public URL:</b> <code>{result}</code>\n"
+        f"⏱ <b>URL type:</b> Temporary — changes each time you /expose\n"
         f"{auth_line}"
-        f"{duck_note}\n\n"
+        f"{duck_section}\n"
         f"Use /revoke <code>{tunnel_id}</code> to shut it down.",
         parse_mode="HTML"
     )
