@@ -146,6 +146,7 @@ Wizard steps:
 4. URL ready
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━━━
 <b>/expose_perm</b>  — Permanent (free CF account)
 
 Fixed URL like <code>myapp.yourdomain.com</code>
@@ -155,13 +156,16 @@ Never changes. Survives restarts.
 1. Tap /expose_perm → 📋 How to get a token
 2. Open <code>cloudflare.com</code> → Sign up free
 3. Dashboard → Zero Trust → Networks → Tunnels
-4. Create tunnel → Cloudflared → name it
-5. Copy the token from the install command
-6. In tunnel settings → Public Hostname → Add:
-   • Subdomain: <code>myapp</code>
-   • Domain: your domain (or <code>workers.dev</code>)
-   • Service: <code>http://localhost:8080</code>
-7. Back in bot → /expose_perm → Enter token
+4. Create tunnel → Cloudflared → name it → Save
+5. On the install page — copy the long token
+   after the word <code>install</code> (starts with <code>eyJ</code>)
+   ⚠️ Don't run that command — bot does it for you
+6. Still on same page → Next: Route tunnel
+   Add public hostname:
+   • Subdomain: <code>app</code>
+   • Domain: your domain or <code>workers.dev</code>
+   • URL: <code>localhost:8080</code> → Save
+7. Back in bot → /expose_perm → Enter token → paste it
 8. ✅ Permanent URL active — saved for future restarts
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
