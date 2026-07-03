@@ -11,6 +11,7 @@ All commands require 2FA.
 """
 
 import re
+import asyncio
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
@@ -345,6 +346,35 @@ async def _launch_tunnel(message: Message, target: str, auth_user: str, auth_pas
 async def cmd_tunnel_status(message: Message):
     tunnels = tunnel_engine.list_tunnels()
     await message.answer(_tunnel_summary(tunnels), parse_mode="HTML")
+
+
+# ── /revoke_all ───────────────────────────────────────────────────────────────
+
+@tunnel_router.message(Command("revoke_all"))
+@require_2fa
+async def cmd_revoke_all(message: Message):
+    """Kill ALL cloudflared tunnels and auth proxies on the host."""
+    from services.tunnel_service import _ssh_exec
+    status = await message.answer(
+        "🛑 <b>Killing all tunnel processes on host...</b>", parse_mode="HTML"
+    )
+    _, out = await asyncio.to_thread(
+        _ssh_exec,
+        "pkill -f 'cloudflared tunnel' 2>/dev/null; "
+        "pkill -f 'tele_auth_proxy' 2>/dev/null; "
+        "echo 'done'",
+        30
+    )
+    # Clear local registry too
+    tunnel_engine._tunnels.clear()
+
+    await status.edit_text(
+        "🛑 <b>All tunnels killed</b>\n\n"
+        "All cloudflared processes stopped on host.\n"
+        "All URLs are now offline.",
+        parse_mode="HTML"
+    )
+    await delete_after(status, delay=15)
 
 
 # ── /revoke ───────────────────────────────────────────────────────────────────

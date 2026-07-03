@@ -64,6 +64,17 @@ async def main():
         apply_to_runtime(mutable)
         logging.info(f"Applied {len(mutable)} mutable settings from persistent store.")
 
+    # Kill any orphaned cloudflared / auth proxy processes from previous bot runs
+    logging.info("Cleaning up orphaned tunnel processes from previous session...")
+    from services.tunnel_service import _ssh_exec as _tun_ssh
+    await asyncio.to_thread(
+        _tun_ssh,
+        "pkill -f 'cloudflared tunnel' 2>/dev/null; "
+        "pkill -f 'tele_auth_proxy' 2>/dev/null; "
+        "echo cleaned",
+        30
+    )
+
     # Start DuckDNS auto-updater if configured
     if runtime_settings.DUCKDNS_TOKEN and runtime_settings.DUCKDNS_DOMAIN:
         asyncio.create_task(
