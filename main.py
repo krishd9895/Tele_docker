@@ -247,15 +247,13 @@ async def main():
         thread = threading.Thread(target=_run_command, daemon=True)
         thread.start()
 
-        # Store state
+        # Store stop event in the in-memory dict (not FSM — threading.Event can't be serialized)
+        _active_commands[user_id] = {"stop_event": stop_event}
         await state.set_state(HostCommandStates.running)
         await state.update_data(
-            stop_event=stop_event,
-            status_message_id=status_message.message_id,
             target_cmd=target_cmd,
             start_time=time.time()
         )
-        _active_commands[user_id] = {"stop_event": stop_event}
 
         # Monitor the command
         last_update_time = time.time()
@@ -305,20 +303,26 @@ async def main():
 
                 # Check queue for results
                 try:
-                    msg_type = output_queue.get_nowait()
-                    if msg_type[0] in ("done", "error"):
+                    result = output_queue.get_nowait()
+                    if result[0] in ("done", "error"):
+                        final_result = result
                         break
                 except queue.Empty:
                     pass
 
-            # Command is done
-            msg_type = output_queue.get()
-            if msg_type[0] == "done":
-                code, result_payload, was_stopped = msg_type[1], msg_type[2], msg_type[3]
+            # Command is done — use cached result or wait briefly
+            if 'final_result' not in dir():
+                try:
+                    final_result = output_queue.get(timeout=5.0)
+                except Exception:
+                    final_result = ("done", -1, "(no output captured)", False)
+
+            if final_result[0] == "done":
+                code, result_payload, was_stopped = final_result[1], final_result[2], final_result[3]
                 status_text = "✅ <b>Finished</b>" if not was_stopped else "⏹️ <b>Stopped</b>"
             else:
                 code = -1
-                result_payload = msg_type[1]
+                result_payload = str(final_result[1]) if len(final_result) > 1 else "(error)"
                 status_text = "❌ <b>Error</b>"
         finally:
             stop_event.set()
@@ -355,17 +359,20 @@ async def main():
             await message.answer_document(doc, caption=f"📄 Full output of: {target_cmd[:80]}")
 
     @hidden_host_router.callback_query(F.data == "stop_host_cmd")
-    @require_2fa
-    async def handle_stop_host_cmd(callback: CallbackQuery, state: FSMContext):
-        """Handle stop button press for host commands."""
+    async def handle_stop_host_cmd(callback: CallbackQuery):
+        """Handle stop button press — looks up the stop event by user_id."""
         user_id = callback.from_user.id
-        if user_id in _active_commands:
-            cmd_info = _active_commands[user_id]
-            if 'stop_event' in cmd_info:
-                cmd_info['stop_event'].set()
-            await callback.answer("Stopping command...", show_alert=True)
+        cmd_info = _active_commands.get(user_id)
+        if cmd_info and "stop_event" in cmd_info:
+            cmd_info["stop_event"].set()
+            await callback.answer("⏹️ Stop signal sent — command will end shortly.", show_alert=False)
+            # Update button to show it was clicked
+            try:
+                await callback.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
         else:
-            await callback.answer("No active command to stop.", show_alert=True)
+            await callback.answer("No active command found for your user.", show_alert=True)
 
     @hidden_host_router.message(Command("host_cd"))
     @require_2fa
