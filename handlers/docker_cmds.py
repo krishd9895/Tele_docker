@@ -449,7 +449,8 @@ async def _do_docker_build(message: Message, repo_path: str):
     await status.edit_text(
         f"🔨 <b>Build Pipeline: {project_name}</b>\n\n"
         f"✅ Step 1/3 — Pull: <code>{_html.escape(pull_summary)}</code>\n\n"
-        f"⏳ Step 2/3 — Building images...",
+        f"⏳ Step 2/3 — Building images...\n"
+        f"<i>This may take a few minutes for large images.</i>",
         parse_mode="HTML"
     )
 
@@ -474,21 +475,44 @@ async def _do_docker_build(message: Message, repo_path: str):
     )
 
     # ── Step 3: compose up -d ─────────────────────────────────────────────────
-    up_ok, up_out = await docker_engine.compose_up(repo_path)
-    up_trimmed = _html.escape(up_out[-1000:] if len(up_out) > 1000 else up_out)
+    # IMPORTANT: If this is the bot's own project, compose up will kill this
+    # process. Send the message FIRST, then trigger restart as fire-and-forget.
+    from utils.ssh_helper import get_ssh_creds
+    user, _ = get_ssh_creds()
+    path_not_in_container = not __import__('pathlib').Path(repo_path).exists()
+    is_self_restart = path_not_in_container  # host paths always go via SSH
 
-    if up_ok:
+    if is_self_restart:
+        # Send completion message BEFORE triggering restart
         await status.edit_text(
             f"✅ <b>Build Pipeline Complete: {project_name}</b>\n\n"
             f"✅ git pull\n"
-            f"✅ docker compose build\n"       
-            f"✅ docker compose up -d\n\n"     
-            f"<pre>{up_trimmed}</pre>",
+            f"✅ docker compose build\n"
+            f"🔄 docker compose up -d  ← <i>restarting now via host SSH...</i>\n\n"
+            f"<i>The bot may go offline briefly. It will reconnect automatically.</i>",
             parse_mode="HTML"
         )
+        # Small delay to ensure message is delivered before the bot dies
+        await asyncio.sleep(2)
+        # Fire-and-forget — don't await the result (we'll be dead)
+        asyncio.create_task(docker_engine.compose_up(repo_path))
     else:
-        await status.edit_text(
-            f"⚠️ <b>Build done but stack failed to start</b>\n\n"
-            f"<pre>{up_trimmed}</pre>",
-            parse_mode="HTML"
-        )
+        # Container-local project — safe to await
+        up_ok, up_out = await docker_engine.compose_up(repo_path)
+        up_trimmed = _html.escape(up_out[-1000:] if len(up_out) > 1000 else up_out)
+
+        if up_ok:
+            await status.edit_text(
+                f"✅ <b>Build Pipeline Complete: {project_name}</b>\n\n"
+                f"✅ git pull\n"
+                f"✅ docker compose build\n"
+                f"✅ docker compose up -d\n\n"
+                f"<pre>{up_trimmed}</pre>",
+                parse_mode="HTML"
+            )
+        else:
+            await status.edit_text(
+                f"⚠️ <b>Build done but stack failed to start</b>\n\n"
+                f"<pre>{up_trimmed}</pre>",
+                parse_mode="HTML"
+            )
