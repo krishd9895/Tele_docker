@@ -149,6 +149,38 @@ class DockerOrchestrationEngine:
             })
         return projects
 
+    async def compose_build(self, project_path: str, manifest_name: str = None) -> tuple[bool, str]:
+        """Run docker compose build in the given path."""
+        path = Path(project_path)
+
+        if not path.exists():
+            return await self._compose_cmd_on_host(project_path, "build", manifest_name)
+
+        if not manifest_name:
+            for cf in COMPOSE_FILES:
+                if (path / cf).exists():
+                    manifest_name = cf
+                    break
+        if not manifest_name:
+            return False, "No compose file found in that directory."
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "docker", "compose", "-f", manifest_name, "build",
+                cwd=str(path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=600.0)
+            out = (stdout.decode(errors="replace") + stderr.decode(errors="replace")).strip()
+            if proc.returncode == 0:
+                return True, out or "Build successful."
+            return False, out or "Build failed."
+        except asyncio.TimeoutError:
+            return False, "Timed out after 10 minutes."
+        except Exception as e:
+            return False, str(e)
+
     async def compose_up(self, project_path: str, manifest_name: str = None) -> tuple[bool, str]:
         """Run docker compose up -d. Routes to host via SSH if path not in container."""
         path = Path(project_path)

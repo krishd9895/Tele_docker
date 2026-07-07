@@ -41,6 +41,7 @@ async def cmd_welcome_menu(message: Message):
         "<b>⚙️ Settings:</b>\n"
         "• /showenv - View current .env settings\n"
         "• /setenv <code>&lt;KEY&gt; &lt;value&gt;</code> - Update any .env key\n\n"
+        "• /docker_build - Pull + rebuild + restart a project (one command)\n\n"
         "<b>System Operations</b> <i>(requires 2FA)</i><b>:</b>\n"
         "• /shell <code>&lt;command&gt;</code> - Execute CLI directives\n"
         "• /health - Infrastructure Hardware Dashboard\n"
@@ -358,3 +359,151 @@ async def _do_compose_down(message: Message, project_path: str, manifest: str = 
             parse_mode="HTML"
         )
         await delete_after(status_msg, delay=30)
+
+
+# ── /docker_build ─────────────────────────────────────────────────────────────
+# Full pipeline: git pull → compose down → compose build → compose up -d
+# Shows the gitpull repo picker so user taps a project, bot handles the rest.
+
+@docker_router.message(Command("docker_build"))
+@require_2fa
+async def cmd_docker_build(message: Message):
+    """
+    One-command full rebuild pipeline:
+      1. Show repo picker (same as /gitpull)
+      2. User taps a project
+      3. git pull
+      4. docker compose down
+      5. docker compose build
+      6. docker compose up -d
+    """
+    from services.git_service import git_engine
+
+    repos = await git_engine.list_repos()
+
+    if not repos:
+        reply = await message.answer(
+            "📭 <b>No repositories found.</b>\n\n"
+            "Use /gitclone to clone a project first.",
+            parse_mode="HTML"
+        )
+        await delete_after(reply, delay=15)
+        return
+
+    buttons = []
+    for repo in repos:
+        loc = "🖥️" if repo.get("location") == "host" else "🐳"
+        buttons.append([InlineKeyboardButton(
+            text=f"{loc} {repo['name']}",
+            callback_data=f"dbuild:{repo['path']}"
+        )])
+
+    lines = ["🔨 <b>Select project to rebuild:</b>\n"]
+    for i, repo in enumerate(repos, 1):
+        loc = "🖥️ host" if repo.get("location") == "host" else "🐳 container"
+        lines.append(f"{i}. <code>{repo['name']}</code>  <i>({loc})</i>")
+        lines.append(f"   📂 <code>{repo['path']}</code>\n")
+
+    await message.answer(
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+
+
+@docker_router.callback_query(F.data.startswith("dbuild:"))
+async def callback_docker_build(call: CallbackQuery):
+    repo_path = call.data.split("dbuild:", 1)[1]
+    await call.message.edit_reply_markup(reply_markup=None)
+    await call.answer()
+    await _do_docker_build(call.message, repo_path)
+
+
+async def _do_docker_build(message: Message, repo_path: str):
+    """Execute the full pipeline: pull → down → build → up."""
+    from services.git_service import git_engine
+    import html as _html
+
+    project_name = repo_path.rstrip("/").split("/")[-1]
+
+    status = await message.answer(
+        f"🔨 <b>Build Pipeline: {project_name}</b>\n\n"
+        f"📂 <code>{repo_path}</code>\n\n"
+        f"⏳ Step 1/4 — Pulling latest changes...",
+        parse_mode="HTML"
+    )
+
+    # ── Step 1: git pull ──────────────────────────────────────────────────────
+    pull_ok, pull_result = await git_engine.pull(repo_path)
+
+    if not pull_ok:
+        await status.edit_text(
+            f"❌ <b>Build aborted — git pull failed</b>\n\n"
+            f"<pre>{_html.escape(pull_result)}</pre>",
+            parse_mode="HTML"
+        )
+        return
+
+    pull_summary = pull_result[:300] if len(pull_result) > 300 else pull_result
+
+    await status.edit_text(
+        f"🔨 <b>Build Pipeline: {project_name}</b>\n\n"
+        f"✅ Step 1/4 — Pull: <code>{_html.escape(pull_summary)}</code>\n\n"
+        f"⏳ Step 2/4 — Bringing stack down...",
+        parse_mode="HTML"
+    )
+
+    # ── Step 2: compose down ──────────────────────────────────────────────────
+    down_ok, down_out = await docker_engine.compose_down(repo_path)
+    # compose down failure is non-fatal (stack might not be running)
+    down_note = "✅ Stack stopped." if down_ok else "⚠️ Down skipped (stack not running)."
+
+    await status.edit_text(
+        f"🔨 <b>Build Pipeline: {project_name}</b>\n\n"
+        f"✅ Step 1/4 — Pull done\n"
+        f"{down_note}\n\n"
+        f"⏳ Step 3/4 — Building images...",
+        parse_mode="HTML"
+    )
+
+    # ── Step 3: compose build ─────────────────────────────────────────────────
+    build_ok, build_out = await docker_engine.compose_build(repo_path)
+
+    if not build_ok:
+        trimmed = _html.escape(build_out[-2000:] if len(build_out) > 2000 else build_out)
+        await status.edit_text(
+            f"❌ <b>Build failed at Step 3/4</b>\n\n"
+            f"<pre>{trimmed}</pre>",
+            parse_mode="HTML"
+        )
+        return
+
+    await status.edit_text(
+        f"🔨 <b>Build Pipeline: {project_name}</b>\n\n"
+        f"✅ Step 1/4 — Pull done\n"
+        f"{down_note}\n"
+        f"✅ Step 3/4 — Build complete\n\n"
+        f"⏳ Step 4/4 — Starting stack...",
+        parse_mode="HTML"
+    )
+
+    # ── Step 4: compose up -d ─────────────────────────────────────────────────
+    up_ok, up_out = await docker_engine.compose_up(repo_path)
+    up_trimmed = _html.escape(up_out[-1000:] if len(up_out) > 1000 else up_out)
+
+    if up_ok:
+        await status.edit_text(
+            f"✅ <b>Build Pipeline Complete: {project_name}</b>\n\n"
+            f"✅ git pull\n"
+            f"{down_note}\n"
+            f"✅ docker compose build\n"
+            f"✅ docker compose up -d\n\n"
+            f"<pre>{up_trimmed}</pre>",
+            parse_mode="HTML"
+        )
+    else:
+        await status.edit_text(
+            f"⚠️ <b>Build done but stack failed to start</b>\n\n"
+            f"<pre>{up_trimmed}</pre>",
+            parse_mode="HTML"
+        )

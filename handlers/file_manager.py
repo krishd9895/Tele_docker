@@ -528,7 +528,8 @@ async def _handle_upload(message: Message, override_dest: str = None):
         dest_dir = DEFAULT_UPLOAD_DIR
 
     if not os.path.isabs(dest_dir):
-        dest_dir = os.path.join(shell_engine.current_wd, dest_dir)
+        # Use browser root as base for relative paths
+        dest_dir = os.path.join(_get_browser_root(), dest_dir)
 
     status_msg = await message.answer(
         f"📥 <b>Uploading</b> <code>{original_name}</code>...\n📂 <code>{dest_dir}</code>",
