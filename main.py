@@ -1,9 +1,14 @@
 import asyncio
 import os
 import logging
-from aiogram import Bot, Dispatcher, Router
+import threading
+import queue
+import time
+from aiogram import Bot, Dispatcher, Router, F
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import StatesGroup, State
 
 from config.settings import runtime_settings
 from database.models import init_db
@@ -31,6 +36,12 @@ logging.basicConfig(
 )
 
 # --- Define Hidden Host Execution Core Logic ---
+# Store active command info: user_id -> { 'ssh_client': paramiko.SSHClient, 'stdout', 'stderr', 'stop_event': threading.Event }
+_active_commands: dict[int, dict] = {}
+
+class HostCommandStates(StatesGroup):
+    running = State()
+
 def execute_on_host_machine(command: str, cwd: str | None = None) -> str:
     """Run a command on the WSL host via SSH loopback, optionally with a working directory."""
     from utils.ssh_helper import ssh_exec
@@ -39,6 +50,95 @@ def execute_on_host_machine(command: str, cwd: str | None = None) -> str:
         full_cmd = f'cd "{cwd}" && {command}'
     code, output = ssh_exec(full_cmd, timeout=120)
     return output if output.strip() else "[Command executed with empty output]"
+
+def execute_on_host_machine_streaming(command: str, cwd: str | None = None, stop_event: threading.Event = None, output_line_queue: queue.Queue = None) -> tuple[int, str, bool]:
+    """Run a command on the host with streaming output, returns (exit_code, output, was_stopped)."""
+    import paramiko
+    from utils.ssh_helper import get_ssh_creds, get_ssh_host
+
+    user, password = get_ssh_creds()
+    if not user or not password:
+        return -1, "HOST_SSH_USER or HOST_SSH_PASSWORD not configured in .env", False
+
+    host, port = get_ssh_host()
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    full_cmd = command
+    if cwd:
+        full_cmd = f'cd "{cwd}" && {command}'
+    output_lines = []
+    was_stopped = False
+    exit_code = -1
+
+    try:
+        ssh.connect(host, port=port, username=user, password=password, timeout=15)
+        stdin, stdout, stderr = ssh.exec_command(full_cmd)
+
+        # Read output in a loop
+        while not stop_event.is_set():
+            # Read available data
+            if stdout.channel.recv_ready():
+                chunk = stdout.read(4096)
+                if chunk:
+                    text = chunk.decode(errors="ignore")
+                    lines = text.splitlines(True)  # Keep newlines
+                    output_lines.extend(lines)
+                    if output_line_queue:
+                        for line in lines:
+                            output_line_queue.put(line)
+            if stderr.channel.recv_ready():
+                chunk = stderr.read(4096)
+                if chunk:
+                    text = chunk.decode(errors="ignore")
+                    lines = text.splitlines(True)
+                    output_lines.extend(lines)
+                    if output_line_queue:
+                        for line in lines:
+                            output_line_queue.put(line)
+            # Check if command is done
+            if stdout.channel.exit_status_ready():
+                exit_code = stdout.channel.recv_exit_status()
+                # Read remaining data
+                remaining_stdout = stdout.read()
+                if remaining_stdout:
+                    remaining_lines = remaining_stdout.decode(errors="ignore").splitlines(True)
+                    output_lines.extend(remaining_lines)
+                    if output_line_queue:
+                        for line in remaining_lines:
+                            output_line_queue.put(line)
+                remaining_stderr = stderr.read()
+                if remaining_stderr:
+                    remaining_lines = remaining_stderr.decode(errors="ignore").splitlines(True)
+                    output_lines.extend(remaining_lines)
+                    if output_line_queue:
+                        for line in remaining_lines:
+                            output_line_queue.put(line)
+                break
+            time.sleep(0.1)
+
+        # If stopped, try to kill the process
+        if stop_event.is_set():
+            was_stopped = True
+            # Try to kill the process (this is a best-effort)
+            try:
+                stdin.write(chr(3))  # Send Ctrl+C
+                stdin.flush()
+                time.sleep(0.5)
+            except:
+                pass
+    except Exception as e:
+        error_line = f"\nError: {e}"
+        output_lines.append(error_line)
+        if output_line_queue:
+            output_line_queue.put(error_line)
+    finally:
+        try:
+            ssh.close()
+        except:
+            pass
+
+    return exit_code, "".join(output_lines), was_stopped
+
 
 async def main():
     logging.info("Validating configuration matrices and initializing SQLite metadata layers...")
@@ -85,29 +185,134 @@ async def main():
 
     @hidden_host_router.message(Command("host"))
     @require_2fa
-    async def handle_hidden_host_execution(message: Message):
-        """Hidden /host command — runs commands on the WSL host via SSH."""
+    async def handle_hidden_host_execution(message: Message, state: FSMContext):
+        """Hidden /host command — runs commands on the WSL host via SSH with real-time updates."""
         args = message.text.split(maxsplit=1)
         if len(args) < 2:
-            await message.reply("⚠️ Missing command. Usage: <code>/host &lt;command&gt;</code>", parse_mode="HTML")
+            await message.answer("⚠️ Missing command. Usage: <code>/host &lt;command&gt;</code>", parse_mode="HTML")
             return
 
         target_cmd = args[1]
-        status_update = await message.reply("⏳ Running on host...", parse_mode="HTML")
-
-        result_payload = await asyncio.to_thread(execute_on_host_machine, target_cmd)
-
-        await status_update.delete()
-
         import html as _html
         safe_cmd = _html.escape(target_cmd)
-        safe_output = _html.escape(result_payload)
 
-        header = f"<b>$</b> <code>{safe_cmd}</code>\n\n"
+        # Create stop button
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⏹️ Stop Command", callback_data="stop_host_cmd")]
+        ])
+        status_message = await message.answer(
+            f"⏳ <b>Running</b> <code>{safe_cmd}</code>...\n\nOutput will update every minute.\n<i>(Click Stop to end the command)</i>",
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
+
+        # Setup stop event and shared state
+        user_id = message.from_user.id
+        stop_event = threading.Event()
+        output_queue = queue.Queue()
+        output_line_queue = queue.Queue()
+        done_event = threading.Event()
+        recent_output_lines = []
+
+        def _run_command():
+            try:
+                code, output, was_stopped = execute_on_host_machine_streaming(target_cmd, stop_event=stop_event, output_line_queue=output_line_queue)
+                output_queue.put(("done", code, output, was_stopped))
+            except Exception as e:
+                output_queue.put(("error", str(e)))
+            finally:
+                done_event.set()
+
+        thread = threading.Thread(target=_run_command, daemon=True)
+        thread.start()
+
+        # Store state
+        await state.set_state(HostCommandStates.running)
+        await state.update_data(
+            stop_event=stop_event,
+            status_message_id=status_message.message_id,
+            target_cmd=target_cmd,
+            start_time=time.time()
+        )
+        _active_commands[user_id] = {"stop_event": stop_event}
+
+        # Monitor the command
+        last_update_time = time.time()
+
+        try:
+            while not done_event.is_set():
+                await asyncio.sleep(0.5)
+
+                # Collect new output lines
+                while True:
+                    try:
+                        line = output_line_queue.get_nowait()
+                        recent_output_lines.append(line)
+                        # Keep only last 20 lines
+                        if len(recent_output_lines) > 20:
+                            recent_output_lines.pop(0)
+                    except queue.Empty:
+                        break
+
+                # Check if we need to update (every minute)
+                current_time = time.time()
+                if current_time - last_update_time >= 60:
+                    state_data = await state.get_data()
+                    elapsed = int(current_time - state_data.get("start_time", time.time()))
+                    elapsed_min = elapsed // 60
+                    elapsed_sec = elapsed % 60
+                    header = f"⏳ <b>Running</b> <code>{safe_cmd}</code>...\n<i>Elapsed: {elapsed_min}m {elapsed_sec}s</i>\n\n"
+                    
+                    # Show last 10 lines
+                    if recent_output_lines:
+                        last_10 = recent_output_lines[-10:]
+                        header += "<b>Last 10 lines:</b>\n<pre>"
+                        header += _html.escape("".join(last_10))
+                        header += "</pre>"
+                    else:
+                        header += "<i>No output yet...</i>"
+                    
+                    try:
+                        await status_message.edit_text(
+                            header,
+                            parse_mode="HTML",
+                            reply_markup=keyboard
+                        )
+                    except:
+                        pass  # Ignore edit errors
+                    last_update_time = current_time
+
+                # Check queue for results
+                try:
+                    msg_type = output_queue.get_nowait()
+                    if msg_type[0] in ("done", "error"):
+                        break
+                except queue.Empty:
+                    pass
+
+            # Command is done
+            msg_type = output_queue.get()
+            if msg_type[0] == "done":
+                code, result_payload, was_stopped = msg_type[1], msg_type[2], msg_type[3]
+                status_text = "✅ <b>Finished</b>" if not was_stopped else "⏹️ <b>Stopped</b>"
+            else:
+                code = -1
+                result_payload = msg_type[1]
+                status_text = "❌ <b>Error</b>"
+        finally:
+            stop_event.set()
+            await state.clear()
+            if user_id in _active_commands:
+                del _active_commands[user_id]
+
+        # Show final output
+        await status_message.delete()
+        safe_output = _html.escape(result_payload)
+        header = f"{status_text}\n<b>$</b> <code>{safe_cmd}</code>\n<b>Exit code:</b> <code>{code}</code>\n\n"
         full_text = header + f"<pre>{safe_output}</pre>"
 
         if len(full_text) <= 4096:
-            await message.reply(full_text, parse_mode="HTML")
+            await message.answer(full_text, parse_mode="HTML")
         else:
             # Show tail inline + attach full output as file
             from aiogram.types import BufferedInputFile
@@ -120,13 +325,26 @@ async def main():
                 + "<i>⚠️ Output too long — showing last 3500 chars. Full output attached.</i>\n\n"
                 + f"<pre>{tail}</pre>"
             )
-            await message.reply(truncated, parse_mode="HTML")
+            await message.answer(truncated, parse_mode="HTML")
 
             raw_bytes = result_payload.encode('utf-8', errors='replace')
             if len(raw_bytes) > 10 * 1024 * 1024:
                 raw_bytes = raw_bytes[:10 * 1024 * 1024] + b"\n[CAPPED AT 10MB]"
             doc = BufferedInputFile(raw_bytes, filename="host_output.txt")
             await message.answer_document(doc, caption=f"📄 Full output of: {target_cmd[:80]}")
+
+    @hidden_host_router.callback_query(F.data == "stop_host_cmd")
+    @require_2fa
+    async def handle_stop_host_cmd(callback: CallbackQuery, state: FSMContext):
+        """Handle stop button press for host commands."""
+        user_id = callback.from_user.id
+        if user_id in _active_commands:
+            cmd_info = _active_commands[user_id]
+            if 'stop_event' in cmd_info:
+                cmd_info['stop_event'].set()
+            await callback.answer("Stopping command...", show_alert=True)
+        else:
+            await callback.answer("No active command to stop.", show_alert=True)
 
     @hidden_host_router.message(Command("host_cd"))
     @require_2fa
