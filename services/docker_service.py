@@ -1,10 +1,11 @@
 import docker
 import asyncio
 import os
-import paramiko
 from pathlib import Path
 from typing import AsyncGenerator
 import logging
+
+from utils.ssh_helper import ssh_exec as _ssh_exec_base
 
 logger = logging.getLogger(__name__)
 
@@ -12,23 +13,7 @@ COMPOSE_FILES = ["docker-compose.yml", "docker-compose.yaml", "compose.yaml", "c
 
 
 def _ssh_exec(command: str, timeout: int = 120) -> tuple[int, str]:
-    """Run a command on the WSL host via SSH."""
-    ssh_user = os.getenv("HOST_SSH_USER")
-    ssh_pass = os.getenv("HOST_SSH_PASSWORD")
-    if not ssh_user or not ssh_pass:
-        return -1, "HOST_SSH_USER or HOST_SSH_PASSWORD not configured"
-    ssh = paramiko.SSHClient()
-    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    try:
-        ssh.connect("127.0.0.1", username=ssh_user, password=ssh_pass, timeout=15)
-        _, stdout, stderr = ssh.exec_command(command, timeout=timeout)
-        exit_code = stdout.channel.recv_exit_status()
-        output = stdout.read().decode(errors="ignore") + stderr.read().decode(errors="ignore")
-        return exit_code, output.strip()
-    except Exception as e:
-        return -1, str(e)
-    finally:
-        ssh.close()
+    return _ssh_exec_base(command, timeout=timeout)
 
 class DockerOrchestrationEngine:
     def __init__(self):

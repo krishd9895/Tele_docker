@@ -1,29 +1,24 @@
 import os
 import asyncio
-import paramiko
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, BufferedInputFile, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
-from services.shell_service import shell_engine
 from utils.msg_cleaner import delete_command, delete_after, auto_clean
+from utils.ssh_helper import get_ssh_creds, get_ssh_host, ssh_exec as _ssh_exec_helper
 
 file_router = Router()
 
 DEFAULT_UPLOAD_DIR = "/app/data/uploads"
-BROWSER_ROOT = "/home/d"
 PAGE_SIZE = 8
 
 # ── Path registry ─────────────────────────────────────────────────────────────
-# Telegram callback_data limit is 64 bytes. We store full paths here and use
-# short integer keys in the callback_data instead.
 _path_registry: dict[int, str] = {}
 _path_registry_rev: dict[str, int] = {}
 _path_counter = 0
 
 def _reg(path: str) -> int:
-    """Register a path and return its short integer key."""
     global _path_counter
     if path in _path_registry_rev:
         return _path_registry_rev[path]
@@ -35,6 +30,13 @@ def _reg(path: str) -> int:
 def _lookup(key: int) -> str | None:
     return _path_registry.get(key)
 
+def _get_browser_root() -> str:
+    """Get the browser root from settings, fallback to /home/d."""
+    try:
+        from config.settings import runtime_settings
+        return getattr(runtime_settings, "BROWSER_ROOT", None) or "/home/d"
+    except Exception:
+        return "/home/d"
 
 # ── FSM ───────────────────────────────────────────────────────────────────────
 
@@ -47,27 +49,19 @@ class UploadStates(StatesGroup):
 
 def _list_host_dirs(path: str) -> list[str]:
     """Return sorted list of subdirectory full paths via SSH."""
-    ssh_user = os.getenv("HOST_SSH_USER")
-    ssh_pass = os.getenv("HOST_SSH_PASSWORD")
-    if not ssh_user or not ssh_pass:
+    user, _ = get_ssh_creds()
+    if not user:
         return []
-    ssh = paramiko.SSHClient()
-    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    try:
-        ssh.connect("127.0.0.1", username=ssh_user, password=ssh_pass, timeout=10)
-        _, stdout, _ = ssh.exec_command(
-            f'find "{path}" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort',
-            timeout=15
-        )
-        stdout.channel.recv_exit_status()
-        return [
-            line.strip() for line in stdout.read().decode(errors="ignore").splitlines()
-            if line.strip() and not line.strip().split("/")[-1].startswith(".")
-        ]
-    except Exception:
+    code, out = _ssh_exec_helper(
+        f'find "{path}" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort',
+        timeout=15
+    )
+    if code != 0 or not out.strip():
         return []
-    finally:
-        ssh.close()
+    return [
+        line.strip() for line in out.splitlines()
+        if line.strip() and not line.strip().split("/")[-1].startswith(".")
+    ]
 
 
 # ── Keyboard builders ─────────────────────────────────────────────────────────
@@ -105,7 +99,7 @@ def _browser_keyboard(
     # Up + confirm row
     action = []
     parent = str(os.path.dirname(current_path.rstrip("/")))
-    if current_path.rstrip("/") != BROWSER_ROOT.rstrip("/") and parent:
+    if current_path.rstrip("/") != _get_browser_root().rstrip("/") and parent:
         pk = _reg(parent)
         action.append(InlineKeyboardButton(text="⬆️ Up", callback_data=f"fb:e:{pk}:0:{pending_key}"))
 
@@ -133,72 +127,224 @@ def _browser_text(path: str, subdirs: list[str], page: int) -> str:
     )
 
 
-# ── /ls ───────────────────────────────────────────────────────────────────────
-
-@file_router.message(Command("ls"))
-async def cmd_ls(message: Message):
-    import html as _html
-    await delete_command(message)
-    code, output = await shell_engine.execute_cmd("ls -la")
-    safe_output = _html.escape(output[:3800] if len(output) > 3800 else output)
-    reply = await message.answer(f"📁 <b>Directory Indexing:</b>\n<pre>{safe_output}</pre>", parse_mode="HTML")
-    await delete_after(reply, delay=30)
-
-
-# ── /cat ──────────────────────────────────────────────────────────────────────
-
-@file_router.message(Command("cat"))
-async def cmd_cat(message: Message):
-    import html as _html
-    args = message.text.replace("/cat", "").strip()
-    if not args:
-        reply = await message.answer("⚠️ Usage: <code>/cat &lt;filename&gt;</code>", parse_mode="HTML")
-        await auto_clean(message, reply, reply_delay=10)
-        return
-    await delete_command(message)
-    code, output = await shell_engine.execute_cmd(f"cat {args}")
-    # Cap output before any processing
-    if len(output) > 512 * 1024:
-        output = output[:512 * 1024] + "\n\n[OUTPUT CAPPED AT 512KB]"
-    safe_output = _html.escape(output)
-    if len(safe_output) > 4000:
-        # Use a safe filename — strip path separators
-        safe_name = os.path.basename(args.strip()) or "file_contents.txt"
-        if not safe_name.endswith(".txt"):
-            safe_name = safe_name + ".txt"
-        doc = BufferedInputFile(output.encode('utf-8', errors='replace'), filename=safe_name)
-        await message.answer_document(doc, caption=f"📄 Contents of {args}")
-    else:
-        reply = await message.answer(
-            f"📄 <b>File Viewer ({_html.escape(args)}):</b>\n<pre>{safe_output}</pre>",
-            parse_mode="HTML"
-        )
-        await delete_after(reply, delay=60)
-
 
 # ── /download ─────────────────────────────────────────────────────────────────
 
+def _list_host_entries(path: str) -> tuple[list[str], list[str]]:
+    """Return (subdirs, files) at path on the host via SSH."""
+    user, _ = get_ssh_creds()
+    if not user:
+        return [], []
+
+    _, dout = _ssh_exec_helper(
+        f'find "{path}" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort', 15
+    )
+    _, fout = _ssh_exec_helper(
+        f'find "{path}" -maxdepth 1 -mindepth 1 -type f 2>/dev/null | sort', 15
+    )
+    dirs = [
+        l.strip() for l in dout.splitlines()
+        if l.strip() and not l.strip().split("/")[-1].startswith(".")
+    ]
+    files = [
+        l.strip() for l in fout.splitlines()
+        if l.strip() and not l.strip().split("/")[-1].startswith(".")
+    ]
+    return dirs, files
+
+
+def _dl_browser_keyboard(path: str, dirs: list[str], files: list[str], page: int) -> InlineKeyboardMarkup:
+    """Keyboard for download browser — shows folders and files, tap file to download."""
+    buttons = []
+    all_entries = [("dir", d) for d in dirs] + [("file", f) for f in files]
+    start = page * PAGE_SIZE
+    page_entries = all_entries[start: start + PAGE_SIZE]
+
+    for kind, full_path in page_entries:
+        name = full_path.rstrip("/").split("/")[-1]
+        key = _reg(full_path)
+        if kind == "dir":
+            buttons.append([InlineKeyboardButton(
+                text=f"📁 {name}",
+                callback_data=f"dl:e:{key}:{page}"
+            )])
+        else:
+            # Show file size if possible
+            buttons.append([InlineKeyboardButton(
+                text=f"📄 {name}",
+                callback_data=f"dl:f:{key}"
+            )])
+
+    # Pagination
+    nav = []
+    cur_key = _reg(path)
+    total = len(all_entries)
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀ Prev", callback_data=f"dl:p:{cur_key}:{page-1}"))
+    if start + PAGE_SIZE < total:
+        nav.append(InlineKeyboardButton(text="Next ▶", callback_data=f"dl:p:{cur_key}:{page+1}"))
+    if nav:
+        buttons.append(nav)
+
+    # Up button
+    parent = str(os.path.dirname(path.rstrip("/")))
+    if path.rstrip("/") != _get_browser_root().rstrip("/") and parent:
+        pk = _reg(parent)
+        buttons.append([InlineKeyboardButton(text="⬆️ Up", callback_data=f"dl:e:{pk}:0")])
+
+    buttons.append([InlineKeyboardButton(text="❌ Cancel", callback_data="dl:cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def _dl_browser_text(path: str, dirs: list[str], files: list[str], page: int) -> str:
+    total = len(dirs) + len(files)
+    start = page * PAGE_SIZE
+    end = min(start + PAGE_SIZE, total)
+    return (
+        f"📂 <b>Download Browser</b>\n\n"
+        f"<b>Path:</b> <code>{path}</code>\n"
+        f"<b>📁 Folders:</b> {len(dirs)}  <b>📄 Files:</b> {len(files)}"
+        + (f"  <i>(page {page+1}, showing {start+1}–{end})</i>" if total > PAGE_SIZE else "")
+        + "\n\nTap 📁 to navigate into a folder.\nTap 📄 to download that file."
+    )
+
+
 @file_router.message(Command("download"))
 async def cmd_download(message: Message):
-    args = message.text.replace("/download", "").strip()
-    if not args:
-        reply = await message.answer("⚠️ Usage: <code>/download &lt;filepath&gt;</code>", parse_mode="HTML")
-        await auto_clean(message, reply, reply_delay=10)
-        return
+    """Open folder browser to pick a file to download."""
     await delete_command(message)
-    target_path = os.path.join(shell_engine.current_wd, args)
-    if not os.path.exists(target_path) or os.path.isdir(target_path):
-        reply = await message.answer("❌ Target file not found or path describes a folder array.")
+    browser_root = _get_browser_root()
+
+    # Check if SSH is available
+    user, _ = get_ssh_creds()
+    if not user:
+        # Fall back to old behaviour — just use a path argument
+        reply = await message.answer(
+            "⚠️ SSH not configured. Usage: <code>/download &lt;filepath&gt;</code>",
+            parse_mode="HTML"
+        )
         await delete_after(reply, delay=10)
         return
+
+    loading = await message.answer("📂 <b>Loading download browser...</b>", parse_mode="HTML")
+    dirs, files = await asyncio.to_thread(_list_host_entries, browser_root)
+    keyboard = _dl_browser_keyboard(browser_root, dirs, files, page=0)
+    await loading.edit_text(
+        _dl_browser_text(browser_root, dirs, files, page=0),
+        parse_mode="HTML",
+        reply_markup=keyboard
+    )
+
+
+@file_router.callback_query(F.data.startswith("dl:e:") | F.data.startswith("dl:p:"))
+async def cb_dl_navigate(call: CallbackQuery):
+    """Navigate into a folder or paginate."""
+    await call.answer()
+    parts = call.data.split(":")
     try:
-        with open(target_path, "rb") as f:
-            file_data = f.read()
-        doc = BufferedInputFile(file_data, filename=os.path.basename(target_path))
-        await message.answer_document(doc, caption=f"📥 Download complete: {args}")
+        path_key = int(parts[2])
+        page = int(parts[3])
+    except (IndexError, ValueError):
+        return
+
+    path = _lookup(path_key)
+    if not path:
+        await call.answer("Path expired, please restart /download", show_alert=True)
+        return
+
+    dirs, files = await asyncio.to_thread(_list_host_entries, path)
+    keyboard = _dl_browser_keyboard(path, dirs, files, page=page)
+    try:
+        await call.message.edit_text(
+            _dl_browser_text(path, dirs, files, page),
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
+    except Exception:
+        pass
+
+
+@file_router.callback_query(F.data.startswith("dl:f:"))
+async def cb_dl_download_file(call: CallbackQuery):
+    """User tapped a file — download it via SFTP and send to Telegram."""
+    await call.answer()
+    parts = call.data.split(":")
+    try:
+        file_key = int(parts[2])
+    except (IndexError, ValueError):
+        return
+
+    file_path = _lookup(file_key)
+    if not file_path:
+        await call.message.answer("❌ File reference expired. Please restart /download.")
+        return
+
+    filename = os.path.basename(file_path)
+    status = await call.message.answer(
+        f"📥 <b>Downloading</b> <code>{filename}</code>...",
+        parse_mode="HTML"
+    )
+
+    # Download file from host via SFTP
+    def _sftp_read() -> bytes:
+        import io
+        import paramiko as _pm
+        from utils.ssh_helper import get_ssh_creds, get_ssh_host
+        user, password = get_ssh_creds()
+        host, port = get_ssh_host()
+        ssh = _pm.SSHClient()
+        ssh.set_missing_host_key_policy(_pm.AutoAddPolicy())
+        ssh.connect(host, port=port, username=user, password=password, timeout=15)
+        try:
+            sftp = ssh.open_sftp()
+            buf = io.BytesIO()
+            sftp.getfo(file_path, buf)
+            sftp.close()
+            return buf.getvalue()
+        finally:
+            ssh.close()
+
+    try:
+        file_bytes = await asyncio.to_thread(_sftp_read)
+
+        # Cap at 50MB (Telegram bot upload limit)
+        MAX_TG_BYTES = 50 * 1024 * 1024
+        if len(file_bytes) > MAX_TG_BYTES:
+            await status.edit_text(
+                f"❌ <b>File too large</b>\n\n"
+                f"<code>{filename}</code> is {len(file_bytes) // 1024 // 1024}MB.\n"
+                f"Telegram bots can only send files up to 50MB.",
+                parse_mode="HTML"
+            )
+            return
+
+        size = len(file_bytes)
+        size_str = f"{size} B" if size < 1024 else f"{size/1024:.1f} KB" if size < 1024**2 else f"{size/1024**2:.2f} MB"
+
+        doc = BufferedInputFile(file_bytes, filename=filename)
+        await call.message.answer_document(
+            doc,
+            caption=f"📥 <b>{filename}</b>  ({size_str})\n<code>{file_path}</code>",
+            parse_mode="HTML"
+        )
+        await status.delete()
+
+    except FileNotFoundError:
+        await status.edit_text(f"❌ File not found: <code>{file_path}</code>", parse_mode="HTML")
+        await delete_after(status, delay=15)
+    except PermissionError:
+        await status.edit_text(f"❌ Permission denied: <code>{file_path}</code>", parse_mode="HTML")
+        await delete_after(status, delay=15)
     except Exception as e:
-        reply = await message.answer(f"❌ System read failure: {e}")
-        await delete_after(reply, delay=15)
+        await status.edit_text(f"❌ <b>Download failed:</b>\n<code>{e}</code>", parse_mode="HTML")
+        await delete_after(status, delay=15)
+
+
+@file_router.callback_query(F.data == "dl:cancel")
+async def cb_dl_cancel(call: CallbackQuery):
+    await call.answer()
+    await call.message.edit_text("❌ Download cancelled.")
+    await delete_after(call.message, delay=5)
 
 
 # ── /upload ───────────────────────────────────────────────────────────────────
@@ -207,13 +353,14 @@ async def cmd_download(message: Message):
 async def cmd_upload_prompt(message: Message, state: FSMContext):
     """Open folder browser so user picks a destination first."""
     await delete_command(message)
+    browser_root = _get_browser_root()
     loading = await message.answer("📂 <b>Loading folder browser...</b>", parse_mode="HTML")
-    dirs = await asyncio.to_thread(_list_host_dirs, BROWSER_ROOT)
+    dirs = await asyncio.to_thread(_list_host_dirs, browser_root)
     await state.set_state(UploadStates.browsing)
     await state.update_data(pending_file_id="", pending_file_name="")
-    keyboard = _browser_keyboard(BROWSER_ROOT, dirs, page=0, pending_key="0")
+    keyboard = _browser_keyboard(browser_root, dirs, page=0, pending_key="0")
     await loading.edit_text(
-        _browser_text(BROWSER_ROOT, dirs, page=0),
+        _browser_text(browser_root, dirs, page=0),
         parse_mode="HTML",
         reply_markup=keyboard
     )
@@ -330,15 +477,16 @@ async def cmd_receive_file(message: Message, state: FSMContext):
     fid_key = str(_reg(file_id))
 
     loading = await message.answer("📂 <b>Pick a destination folder:</b>", parse_mode="HTML")
-    dirs = await asyncio.to_thread(_list_host_dirs, BROWSER_ROOT)
+    browser_root = _get_browser_root()
+    dirs = await asyncio.to_thread(_list_host_dirs, browser_root)
 
     await state.set_state(UploadStates.browsing)
     await state.update_data(pending_file_id=file_id, pending_file_name=original_name)
 
-    keyboard = _browser_keyboard(BROWSER_ROOT, dirs, page=0, pending_key=fid_key)
+    keyboard = _browser_keyboard(browser_root, dirs, page=0, pending_key=fid_key)
     await loading.edit_text(
         f"📄 <b>File queued:</b> <code>{original_name}</code>\n\n"
-        + _browser_text(BROWSER_ROOT, dirs, page=0),
+        + _browser_text(browser_root, dirs, page=0),
         parse_mode="HTML",
         reply_markup=keyboard
     )
@@ -414,46 +562,15 @@ async def _save_by_file_id(message: Message, file_id: str, file_name: str, dest_
 
 
 async def _write_via_sftp(dest_dir: str, file_name: str, file_bytes: bytes, status_msg: Message):
-    """Write file to WSL host via SFTP. Falls back to container write if no SSH creds."""
-    ssh_user = os.getenv("HOST_SSH_USER")
-    ssh_pass = os.getenv("HOST_SSH_PASSWORD")
-
-    if not ssh_user or not ssh_pass:
+    """Write file to WSL host via SFTP using centralized ssh_helper. Falls back to local."""
+    user, _ = get_ssh_creds()
+    if not user:
         await _write_local(dest_dir, file_name, file_bytes, status_msg)
         return
 
-    def _do_sftp():
-        import io
-        ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh.connect("127.0.0.1", username=ssh_user, password=ssh_pass, timeout=15)
-        try:
-            ssh.exec_command(f'mkdir -p "{dest_dir}"')[1].channel.recv_exit_status()
-            sftp = ssh.open_sftp()
-            final_name = file_name
-            dest_path = f"{dest_dir.rstrip('/')}/{final_name}"
-            try:
-                sftp.stat(dest_path)
-                base, ext = os.path.splitext(file_name)
-                counter = 1
-                while True:
-                    final_name = f"{base}_{counter}{ext}"
-                    dest_path = f"{dest_dir.rstrip('/')}/{final_name}"
-                    try:
-                        sftp.stat(dest_path)
-                        counter += 1
-                    except FileNotFoundError:
-                        break
-            except FileNotFoundError:
-                pass
-            sftp.putfo(io.BytesIO(file_bytes), dest_path)
-            sftp.close()
-            return dest_path
-        finally:
-            ssh.close()
-
     try:
-        dest_path = await asyncio.to_thread(_do_sftp)
+        from utils.ssh_helper import sftp_write
+        dest_path = await asyncio.to_thread(sftp_write, dest_dir, file_name, file_bytes)
         size = len(file_bytes)
         size_str = f"{size} B" if size < 1024 else f"{size/1024:.1f} KB" if size < 1024**2 else f"{size/1024**2:.2f} MB"
         await status_msg.edit_text(

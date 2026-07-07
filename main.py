@@ -4,7 +4,6 @@ import logging
 from aiogram import Bot, Dispatcher, Router
 from aiogram.filters import Command
 from aiogram.types import Message
-import paramiko
 
 from config.settings import runtime_settings
 from database.models import init_db
@@ -32,41 +31,14 @@ logging.basicConfig(
 )
 
 # --- Define Hidden Host Execution Core Logic ---
-def execute_on_host_machine(command: str) -> str:
-    """Run a command on the host via SSH loopback."""
-    _MAX_BYTES = 512 * 1024  # 512 KB hard cap
-    ssh = None
-    try:
-        ssh_user = runtime_settings.HOST_SSH_USER
-        ssh_pass = runtime_settings.HOST_SSH_PASSWORD
-
-        if not ssh_user or not ssh_pass:
-            return "❌ Host Bridge Error: HOST_SSH_USER or HOST_SSH_PASSWORD not configured"
-
-        ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh.connect(runtime_settings.HOST_SSH_HOST, port=runtime_settings.HOST_SSH_PORT, username=ssh_user, password=ssh_pass, timeout=15)
-
-        stdin, stdout, stderr = ssh.exec_command(command, timeout=120)
-
-        # Read with size cap to prevent huge outputs crashing the bot
-        stdout_bytes = b""
-        for chunk in iter(lambda: stdout.read(4096), b""):
-            stdout_bytes += chunk
-            if len(stdout_bytes) >= _MAX_BYTES:
-                stdout_bytes = stdout_bytes[:_MAX_BYTES]
-                stdout_bytes += b"\n\n[OUTPUT CAPPED -- use redirection: command > /tmp/out.txt]"
-                break
-
-        stderr_bytes = stderr.read(min(4096, _MAX_BYTES))  # brief stderr only
-
-        output = stdout_bytes.decode(errors='ignore') + stderr_bytes.decode(errors='ignore')
-        return output if output.strip() else "[Command executed with empty output]"
-    except Exception as e:
-        return f"❌ Host Bridge Error: {str(e)}"
-    finally:
-        if ssh:
-            ssh.close()
+def execute_on_host_machine(command: str, cwd: str | None = None) -> str:
+    """Run a command on the WSL host via SSH loopback, optionally with a working directory."""
+    from utils.ssh_helper import ssh_exec
+    full_cmd = command
+    if cwd:
+        full_cmd = f'cd "{cwd}" && {command}'
+    code, output = ssh_exec(full_cmd, timeout=120)
+    return output if output.strip() else "[Command executed with empty output]"
 
 async def main():
     logging.info("Validating configuration matrices and initializing SQLite metadata layers...")
@@ -150,6 +122,73 @@ async def main():
             )
             await message.reply(truncated, parse_mode="HTML")
 
+            raw_bytes = result_payload.encode('utf-8', errors='replace')
+            if len(raw_bytes) > 10 * 1024 * 1024:
+                raw_bytes = raw_bytes[:10 * 1024 * 1024] + b"\n[CAPPED AT 10MB]"
+            doc = BufferedInputFile(raw_bytes, filename="host_output.txt")
+            await message.answer_document(doc, caption=f"📄 Full output of: {target_cmd[:80]}")
+
+    @hidden_host_router.message(Command("host_cd"))
+    @require_2fa
+    async def handle_host_cd(message: Message):
+        """Run a command on the WSL host in a specific directory (transient, no persistence). Usage: /host_cd <path> <command>"""
+        args = message.text.split(maxsplit=2)
+        
+        if len(args) < 3:
+            await message.reply(
+                "⚠️ Missing arguments. Usage:\n"
+                "<code>/host_cd &lt;path&gt; &lt;command&gt;</code> — run command in specified directory",
+                parse_mode="HTML"
+            )
+            return
+
+        target_path = args[1]
+        target_cmd = args[2]
+        
+        # First, resolve/validate the path on the host
+        status_update = await message.reply("⏳ Validating path and running...", parse_mode="HTML")
+        
+        # Resolve path
+        resolve_cmd = f'cd "{target_path}" 2>&1 && pwd'
+        resolve_output = await asyncio.to_thread(execute_on_host_machine, resolve_cmd)
+        
+        # Check if cd failed
+        if "cd:" in resolve_output or resolve_output.startswith("bash:"):
+            await status_update.edit_text(
+                f"❌ <b>Failed to change directory:</b>\n<code>{resolve_output}</code>",
+                parse_mode="HTML"
+            )
+            return
+        
+        new_cwd = resolve_output.strip()
+        
+        # Run the command in the resolved directory
+        result_payload = await asyncio.to_thread(execute_on_host_machine, target_cmd, new_cwd)
+        
+        await status_update.delete()
+        
+        import html as _html
+        safe_cmd = _html.escape(target_cmd)
+        safe_output = _html.escape(result_payload)
+        
+        header = f"<b>$</b> <code>{safe_cmd}</code>\n<b>📂</b> <code>{_html.escape(new_cwd)}</code>\n\n"
+        full_text = header + f"<pre>{safe_output}</pre>"
+        
+        if len(full_text) <= 4096:
+            await message.reply(full_text, parse_mode="HTML")
+        else:
+            from aiogram.types import BufferedInputFile
+            tail = safe_output[-3500:]
+            if '\n' in tail:
+                tail = tail[tail.index('\n') + 1:]
+            
+            truncated = (
+                header
+                + "<i>⚠️ Output too long — showing last 3500 chars. Full output attached.</i>\n\n"
+                + f"<pre>{tail}</pre>"
+            )
+            await message.reply(truncated, parse_mode="HTML")
+            
             raw_bytes = result_payload.encode('utf-8', errors='replace')
             if len(raw_bytes) > 10 * 1024 * 1024:
                 raw_bytes = raw_bytes[:10 * 1024 * 1024] + b"\n[CAPPED AT 10MB]"

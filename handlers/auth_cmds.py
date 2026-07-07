@@ -3,7 +3,8 @@ from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 from middlewares.totp_auth import (
-    verify_code, open_session, has_valid_session, revoke_session, session_time_left,
+    verify_code, open_session, has_valid_session, revoke_session,
+    session_time_left, _session_duration_label,
 )
 from utils.msg_cleaner import delete_command, delete_after, auto_clean
 
@@ -23,20 +24,19 @@ async def cmd_verify(message: Message):
         return
 
     code = args[1].strip()
-    # Delete the command immediately — code must not stay visible
     await delete_command(message)
 
     if verify_code(code):
         expiry = open_session(message.from_user.id)
         expiry_str = time.strftime("%H:%M:%S", time.localtime(expiry))
+        duration = _session_duration_label()
         reply = await message.answer(
             f"✅ <b>2FA Verified</b>\n\n"
-            f"Elevated access granted for <b>2 hours</b>.\n"
+            f"Elevated access granted for <b>{duration}</b>.\n"
             f"Session expires at <code>{expiry_str}</code>.\n\n"
             f"Use /lock to revoke early.",
             parse_mode="HTML"
         )
-        # Keep success confirmation visible for 20s then clean up
         await delete_after(reply, delay=20)
     else:
         reply = await message.answer(

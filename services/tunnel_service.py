@@ -14,12 +14,9 @@ import re
 import logging
 import uuid
 import os
-import paramiko
 from datetime import datetime, timezone
 
 import aiohttp
-
-from config.settings import runtime_settings
 
 logger = logging.getLogger(__name__)
 
@@ -108,22 +105,8 @@ server.serve_forever()
 
 
 def _ssh_exec(command: str, timeout: int = 60) -> tuple[int, str]:
-    ssh_user = os.getenv("HOST_SSH_USER")
-    ssh_pass = os.getenv("HOST_SSH_PASSWORD")
-    if not ssh_user or not ssh_pass:
-        return -1, "HOST_SSH_USER / HOST_SSH_PASSWORD not set"
-    ssh = paramiko.SSHClient()
-    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    try:
-        ssh.connect("127.0.0.1", username=ssh_user, password=ssh_pass, timeout=15)
-        _, stdout, stderr = ssh.exec_command(command, timeout=timeout)
-        code = stdout.channel.recv_exit_status()
-        out = stdout.read().decode(errors="ignore") + stderr.read().decode(errors="ignore")
-        return code, out.strip()
-    except Exception as e:
-        return -1, str(e)
-    finally:
-        ssh.close()
+    from utils.ssh_helper import ssh_exec as _helper
+    return _helper(command, timeout=timeout)
 
 
 def _find_free_port_on_host() -> int | None:
@@ -193,13 +176,14 @@ class TunnelEngine:
 
         # Write script file via SFTP
         def _write_script():
-            import io, paramiko as _pm
+            import io
+            from utils.ssh_helper import get_ssh_creds, get_ssh_host
+            import paramiko as _pm
+            user, password = get_ssh_creds()
+            host, port_ssh = get_ssh_host()
             ssh = _pm.SSHClient()
             ssh.set_missing_host_key_policy(_pm.AutoAddPolicy())
-            ssh.connect("127.0.0.1",
-                        username=os.getenv("HOST_SSH_USER"),
-                        password=os.getenv("HOST_SSH_PASSWORD"),
-                        timeout=15)
+            ssh.connect(host, port=port_ssh, username=user, password=password, timeout=15)
             sftp = ssh.open_sftp()
             sftp.putfo(io.BytesIO(_AUTH_PROXY_SCRIPT.encode()), script_path)
             sftp.close()
@@ -287,11 +271,13 @@ class TunnelEngine:
         logger.info(f"Launching cloudflared [{tunnel_id}] → {target_for_tunnel}")
 
         def _start_cf():
-            ssh_user = os.getenv("HOST_SSH_USER")
-            ssh_pass = os.getenv("HOST_SSH_PASSWORD")
-            ssh = paramiko.SSHClient()
-            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            ssh.connect("127.0.0.1", username=ssh_user, password=ssh_pass, timeout=15)
+            from utils.ssh_helper import get_ssh_creds, get_ssh_host
+            import paramiko as _pm
+            user, pwd = get_ssh_creds()
+            host, port_ssh = get_ssh_host()
+            ssh = _pm.SSHClient()
+            ssh.set_missing_host_key_policy(_pm.AutoAddPolicy())
+            ssh.connect(host, port=port_ssh, username=user, password=pwd, timeout=15)
             transport = ssh.get_transport()
             channel = transport.open_session()
             channel.exec_command(cmd)
