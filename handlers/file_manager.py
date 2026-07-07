@@ -60,7 +60,11 @@ def _list_host_dirs(path: str) -> list[str]:
     )
     if code != 0 or not out.strip():
         return []
-    return [line.strip() for line in out.splitlines() if line.strip()]
+    # Remove duplicates
+    unique_dirs = list(set([line.strip() for line in out.splitlines() if line.strip()]))
+    # Sort them again to maintain order
+    unique_dirs.sort()
+    return unique_dirs
 
 
 # ── Keyboard builders ─────────────────────────────────────────────────────────
@@ -137,7 +141,15 @@ def _list_host_entries(path: str) -> tuple[list[str], list[str]]:
 
     # Use a loop to categorize each item
     code, out = _ssh_exec_helper(
-        f'cd "{path}" && for item in *; do [ -e "$item" ] && [ ! "$(echo "$item" | cut -c1)" = "." ] && ( [ -d "$item" ] || [ -L "$item" ] && [ -d "$item" ] ) && echo "D:$(pwd)/$item" || ( [ -f "$item" ] || [ -L "$item" ] && [ -f "$item" ] ) && echo "F:$(pwd)/$item"; done 2>/dev/null | sort',
+        f'cd "{path}" && for item in *; do \
+            if [ -e "$item" ] && [ ! "$(echo "$item" | cut -c1)" = "." ]; then \
+                if [ -d "$item" ] || [ -L "$item" ] && [ -d "$item" ]; then \
+                    echo "D:$(pwd)/$item"; \
+                elif [ -f "$item" ] || [ -L "$item" ] && [ -f "$item" ]; then \
+                    echo "F:$(pwd)/$item"; \
+                fi; \
+            fi; \
+        done 2>/dev/null | sort',
         timeout=15
     )
     dirs = []
@@ -149,7 +161,13 @@ def _list_host_entries(path: str) -> tuple[list[str], list[str]]:
                 dirs.append(line[2:])
             elif line.startswith("F:"):
                 files.append(line[2:])
-    return dirs, files
+    # Remove duplicates
+    unique_dirs = list(set(dirs))
+    unique_files = list(set(files))
+    # Sort them
+    unique_dirs.sort()
+    unique_files.sort()
+    return unique_dirs, unique_files
 
 
 def _dl_browser_keyboard(path: str, dirs: list[str], files: list[str], page: int) -> InlineKeyboardMarkup:
