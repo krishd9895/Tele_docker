@@ -137,9 +137,11 @@ def _browser_text(path: str, subdirs: list[str], page: int) -> str:
 
 @file_router.message(Command("ls"))
 async def cmd_ls(message: Message):
+    import html as _html
     await delete_command(message)
     code, output = await shell_engine.execute_cmd("ls -la")
-    reply = await message.answer(f"📁 <b>Directory Indexing:</b>\n<pre>{output}</pre>", parse_mode="HTML")
+    safe_output = _html.escape(output[:3800] if len(output) > 3800 else output)
+    reply = await message.answer(f"📁 <b>Directory Indexing:</b>\n<pre>{safe_output}</pre>", parse_mode="HTML")
     await delete_after(reply, delay=30)
 
 
@@ -147,6 +149,7 @@ async def cmd_ls(message: Message):
 
 @file_router.message(Command("cat"))
 async def cmd_cat(message: Message):
+    import html as _html
     args = message.text.replace("/cat", "").strip()
     if not args:
         reply = await message.answer("⚠️ Usage: <code>/cat &lt;filename&gt;</code>", parse_mode="HTML")
@@ -154,11 +157,22 @@ async def cmd_cat(message: Message):
         return
     await delete_command(message)
     code, output = await shell_engine.execute_cmd(f"cat {args}")
-    if len(output) > 4000:
-        doc = BufferedInputFile(output.encode('utf-8'), filename=args)
+    # Cap output before any processing
+    if len(output) > 512 * 1024:
+        output = output[:512 * 1024] + "\n\n[OUTPUT CAPPED AT 512KB]"
+    safe_output = _html.escape(output)
+    if len(safe_output) > 4000:
+        # Use a safe filename — strip path separators
+        safe_name = os.path.basename(args.strip()) or "file_contents.txt"
+        if not safe_name.endswith(".txt"):
+            safe_name = safe_name + ".txt"
+        doc = BufferedInputFile(output.encode('utf-8', errors='replace'), filename=safe_name)
         await message.answer_document(doc, caption=f"📄 Contents of {args}")
     else:
-        reply = await message.answer(f"📄 <b>File Viewer ({args}):</b>\n<pre>{output}</pre>", parse_mode="HTML")
+        reply = await message.answer(
+            f"📄 <b>File Viewer ({_html.escape(args)}):</b>\n<pre>{safe_output}</pre>",
+            parse_mode="HTML"
+        )
         await delete_after(reply, delay=60)
 
 

@@ -78,10 +78,10 @@ async def cmd_deploy(message: Message, state: FSMContext):
                 await state.update_data(repo_url=repo_url, status_msg_id=status_msg.message_id)
                 await state.set_state(DeploymentStates.awaiting_token)
             else:
-                # REVEAL EXPLICIT AND COMPREHENSIVE ENGINE FAILURE ERROR OUTPUTS TO THE USER WINDOW
+                import html as _html
                 await status_msg.edit_text(
                     f"❌ <b>Deployment Aborted due to Engine Error:</b>\n\n"
-                    f"<code>{err_str}</code>",
+                    f"<code>{_html.escape(err_str)}</code>",
                     parse_mode="HTML"
                 )
 

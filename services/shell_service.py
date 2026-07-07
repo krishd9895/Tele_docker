@@ -3,6 +3,12 @@ import os
 import shlex
 from pathlib import Path
 
+# Hard cap on output collected from any command
+MAX_OUTPUT_BYTES = 512 * 1024   # 512 KB — beyond this we truncate
+# Telegram message limit (with HTML wrapper overhead)
+TELEGRAM_MSG_LIMIT = 3800
+
+
 class PersistentTmuxShell:
     def __init__(self):
         self.current_wd = os.path.expanduser("~")
@@ -32,19 +38,58 @@ class PersistentTmuxShell:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self.current_wd
             )
-            
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120.0)
-            exit_code = proc.returncode
-            
-            output = stdout.decode('utf-8', errors='replace')
-            errors = stderr.decode('utf-8', errors='replace')
-            
-            combined_output = output + errors
-            return exit_code, combined_output if combined_output.strip() else "[Command executed with empty output]"
-            
+
+            # Read output with a hard size cap — prevents RAM exhaustion on huge output
+            async def _read_capped(stream, limit: int) -> bytes:
+                chunks = []
+                total = 0
+                try:
+                    while True:
+                        chunk = await asyncio.wait_for(stream.read(4096), timeout=2.0)
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                        total += len(chunk)
+                        if total >= limit:
+                            # Drain the rest without storing it
+                            proc.stdout and proc.stdout._transport and proc.stdout._transport.close()
+                            proc.stderr and proc.stderr._transport and proc.stderr._transport.close()
+                            break
+                except (asyncio.TimeoutError, Exception):
+                    pass
+                return b"".join(chunks)
+
+            try:
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    asyncio.gather(
+                        _read_capped(proc.stdout, MAX_OUTPUT_BYTES),
+                        _read_capped(proc.stderr, MAX_OUTPUT_BYTES),
+                    ),
+                    timeout=120.0
+                )
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                proc.kill()
+                return -1, "Execution terminated: Command exceeded time limit (120s)."
+
+            exit_code = proc.returncode or 0
+
+            stdout_str = stdout_bytes.decode('utf-8', errors='replace')
+            stderr_str = stderr_bytes.decode('utf-8', errors='replace')
+            combined = stdout_str + stderr_str
+
+            # Warn if output was capped
+            total_bytes = len(stdout_bytes) + len(stderr_bytes)
+            if total_bytes >= MAX_OUTPUT_BYTES:
+                combined = combined[:MAX_OUTPUT_BYTES].rsplit('\n', 1)[0]
+                combined += f"\n\n⚠️ Output capped at {MAX_OUTPUT_BYTES // 1024}KB — use redirection to save full output:\n  command > /tmp/output.txt"
+
+            return exit_code, combined if combined.strip() else "[Command executed with empty output]"
+
         except asyncio.TimeoutError:
             return -1, "Execution terminated: Command breached time allocation window."
         except Exception as system_fault:
             return -2, f"Subprocess layer structural fault: {system_fault}"
+
 
 shell_engine = PersistentTmuxShell()

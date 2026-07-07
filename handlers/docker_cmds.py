@@ -116,14 +116,18 @@ async def cmd_docker_logs(message: Message):
             await delete_after(status_msg, delay=10)
             return
         logs_bytes = matched[0].logs(tail=200)
+        # Cap log bytes to avoid huge messages
+        if len(logs_bytes) > 512 * 1024:
+            logs_bytes = logs_bytes[-512 * 1024:]
         logs_text = logs_bytes.decode('utf-8', errors='replace')
-        if len(logs_text) > 4000:
+        import html as _html
+        safe_logs = _html.escape(logs_text)
+        if len(safe_logs) > 4000:
             file_payload = BufferedInputFile(logs_bytes, filename=f"{target}_logs.txt")
             await message.answer_document(file_payload, caption=f"📄 Logs for: {target}")
             await status_msg.delete()
         else:
-            await status_msg.edit_text(f"📝 <b>Logs for {target}:</b>\n\n<pre>{logs_text}</pre>", parse_mode="HTML")
-            # Logs are useful — keep for 2 minutes
+            await status_msg.edit_text(f"📝 <b>Logs for {target}:</b>\n\n<pre>{safe_logs}</pre>", parse_mode="HTML")
             await delete_after(status_msg, delay=120)
     except Exception as trace_err:
         await status_msg.edit_text(f"❌ Error compiling logs sequence: {trace_err}")
@@ -240,7 +244,8 @@ async def _do_compose_up(message: Message, project_path: str, manifest: str = No
         parse_mode="HTML"
     )
     success, output = await docker_engine.compose_up(project_path, manifest)
-    trimmed = output[-3000:] if len(output) > 3000 else output
+    import html as _html
+    trimmed = _html.escape(output[-3000:] if len(output) > 3000 else output)
     if success:
         await status_msg.edit_text(
             f"✅ <b>Compose Up Successful</b>\n\n"
@@ -297,7 +302,8 @@ async def _do_compose_down(message: Message, project_path: str, manifest: str = 
         parse_mode="HTML"
     )
     success, output = await docker_engine.compose_down(project_path, manifest)
-    trimmed = output[-3000:] if len(output) > 3000 else output
+    import html as _html
+    trimmed = _html.escape(output[-3000:] if len(output) > 3000 else output)
     if success:
         await status_msg.edit_text(
             f"🛑 <b>Compose Down Successful</b>\n\n"

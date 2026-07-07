@@ -33,22 +33,31 @@ logging.basicConfig(
 
 # --- Define Hidden Host Execution Core Logic ---
 def execute_on_host_machine(command: str) -> str:
-    """Tunnels structural system commands to the host OS via SSH loopback interface."""
+    """Run a command on the WSL host via SSH loopback."""
+    _MAX_BYTES = 512 * 1024  # 512 KB hard cap
     try:
-        # Load credentials directly out of the environment layout stream
         ssh_user = os.getenv("HOST_SSH_USER")
-        ssh_pass = os.getenv("HOST_SSH_PASSWORD", "YOUR_UBUNTU_PASSWORD")
-        
+        ssh_pass = os.getenv("HOST_SSH_PASSWORD")
+
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        
-        # Connect natively to host stack via host-networked localhost
-        ssh.connect('127.0.0.1', username=ssh_user, password=ssh_pass)
-        
-        stdin, stdout, stderr = ssh.exec_command(command)
-        output = stdout.read().decode(errors='ignore') + stderr.read().decode(errors='ignore')
+        ssh.connect('127.0.0.1', username=ssh_user, password=ssh_pass, timeout=15)
+
+        stdin, stdout, stderr = ssh.exec_command(command, timeout=120)
+
+        # Read with size cap to prevent huge outputs crashing the bot
+        stdout_bytes = b""
+        for chunk in iter(lambda: stdout.read(4096), b""):
+            stdout_bytes += chunk
+            if len(stdout_bytes) >= _MAX_BYTES:
+                stdout_bytes = stdout_bytes[:_MAX_BYTES]
+                stdout_bytes += b"\n\n[OUTPUT CAPPED — use redirection: command > /tmp/out.txt]"
+                break
+
+        stderr_bytes = stderr.read(min(4096, _MAX_BYTES))  # brief stderr only
         ssh.close()
-        
+
+        output = stdout_bytes.decode(errors='ignore') + stderr_bytes.decode(errors='ignore')
         return output if output.strip() else "[Command executed with empty output]"
     except Exception as e:
         return f"❌ Host Bridge Error: {str(e)}"
@@ -99,21 +108,47 @@ async def main():
     @hidden_host_router.message(Command("host"))
     @require_2fa
     async def handle_hidden_host_execution(message: Message):
-        """Processes /host inputs completely under the radar (Not registered in BotFather Help Menu)"""
+        """Hidden /host command — runs commands on the WSL host via SSH."""
         args = message.text.split(maxsplit=1)
         if len(args) < 2:
-            await message.reply("⚠️ Missing command execution payload.")
+            await message.reply("⚠️ Missing command. Usage: <code>/host &lt;command&gt;</code>", parse_mode="HTML")
             return
 
         target_cmd = args[1]
-        status_update = await message.reply("⏳ Routing command string directly to Host PC core...")
+        status_update = await message.reply("⏳ Running on host...", parse_mode="HTML")
 
         result_payload = await asyncio.to_thread(execute_on_host_machine, target_cmd)
 
         await status_update.delete()
-        # Trim if too long
-        trimmed = result_payload[-3800:] if len(result_payload) > 3800 else result_payload
-        await message.reply(f"```\n{trimmed}\n```", parse_mode="Markdown")
+
+        import html as _html
+        safe_cmd = _html.escape(target_cmd)
+        safe_output = _html.escape(result_payload)
+
+        header = f"<b>$</b> <code>{safe_cmd}</code>\n\n"
+        full_text = header + f"<pre>{safe_output}</pre>"
+
+        if len(full_text) <= 4096:
+            await message.reply(full_text, parse_mode="HTML")
+        else:
+            # Show tail inline + attach full output as file
+            from aiogram.types import BufferedInputFile
+            tail = safe_output[-3500:]
+            if '\n' in tail:
+                tail = tail[tail.index('\n') + 1:]
+
+            truncated = (
+                header
+                + "<i>⚠️ Output too long — showing last 3500 chars. Full output attached.</i>\n\n"
+                + f"<pre>{tail}</pre>"
+            )
+            await message.reply(truncated, parse_mode="HTML")
+
+            raw_bytes = result_payload.encode('utf-8', errors='replace')
+            if len(raw_bytes) > 10 * 1024 * 1024:
+                raw_bytes = raw_bytes[:10 * 1024 * 1024] + b"\n[CAPPED AT 10MB]"
+            doc = BufferedInputFile(raw_bytes, filename="host_output.txt")
+            await message.answer_document(doc, caption=f"📄 Full output of: {target_cmd[:80]}")
 
     # --- Attach Routers to the Dispatcher Engine ---
     # Register the hidden router first so it has immediate structural evaluation priority
