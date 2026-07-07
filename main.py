@@ -33,15 +33,19 @@ logging.basicConfig(
 
 # --- Define Hidden Host Execution Core Logic ---
 def execute_on_host_machine(command: str) -> str:
-    """Run a command on the WSL host via SSH loopback."""
+    """Run a command on the host via SSH loopback."""
     _MAX_BYTES = 512 * 1024  # 512 KB hard cap
+    ssh = None
     try:
-        ssh_user = os.getenv("HOST_SSH_USER")
-        ssh_pass = os.getenv("HOST_SSH_PASSWORD")
+        ssh_user = runtime_settings.HOST_SSH_USER
+        ssh_pass = runtime_settings.HOST_SSH_PASSWORD
+
+        if not ssh_user or not ssh_pass:
+            return "❌ Host Bridge Error: HOST_SSH_USER or HOST_SSH_PASSWORD not configured"
 
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh.connect('127.0.0.1', username=ssh_user, password=ssh_pass, timeout=15)
+        ssh.connect(runtime_settings.HOST_SSH_HOST, port=runtime_settings.HOST_SSH_PORT, username=ssh_user, password=ssh_pass, timeout=15)
 
         stdin, stdout, stderr = ssh.exec_command(command, timeout=120)
 
@@ -51,16 +55,18 @@ def execute_on_host_machine(command: str) -> str:
             stdout_bytes += chunk
             if len(stdout_bytes) >= _MAX_BYTES:
                 stdout_bytes = stdout_bytes[:_MAX_BYTES]
-                stdout_bytes += b"\n\n[OUTPUT CAPPED — use redirection: command > /tmp/out.txt]"
+                stdout_bytes += b"\n\n[OUTPUT CAPPED -- use redirection: command > /tmp/out.txt]"
                 break
 
         stderr_bytes = stderr.read(min(4096, _MAX_BYTES))  # brief stderr only
-        ssh.close()
 
         output = stdout_bytes.decode(errors='ignore') + stderr_bytes.decode(errors='ignore')
         return output if output.strip() else "[Command executed with empty output]"
     except Exception as e:
         return f"❌ Host Bridge Error: {str(e)}"
+    finally:
+        if ssh:
+            ssh.close()
 
 async def main():
     logging.info("Validating configuration matrices and initializing SQLite metadata layers...")

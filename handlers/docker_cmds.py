@@ -79,21 +79,63 @@ async def cmd_docker_ps(message: Message):
 @docker_router.message(Command("health"))
 async def cmd_health(message: Message):
     await delete_command(message)
-    status_msg = await message.answer("📊 <i>Compiling physical cluster metrics...</i>", parse_mode="HTML")
+    status_msg = await message.answer("📊 <i>Compiling comprehensive system metrics...</i>", parse_mode="HTML")
     try:
         metrics = await monitor_service.compile_system_health_dashboard()
+        
+        # Build disk info
+        disk_lines = []
+        for d in metrics['disks']:
+            free_gb = d['free'] // (1024**3)
+            used_percent = d['percent']
+            emoji = "🟢" if used_percent < 70 else "🟡" if used_percent < 90 else "🔴"
+            disk_lines.append(f"{emoji} <code>{d['mountpoint']}</code>: {used_percent}% used ({free_gb} GB free)")
+        
+        # Build container list
+        container_lines = []
+        if metrics['docker']['running_containers']:
+            for c in metrics['docker']['running_containers']:
+                container_lines.append(f"• 🟢 <code>{c}</code>")
+        else:
+            container_lines.append("• No running containers")
+        
         dashboard = (
-            f"🖥️ <b>WSL Node Health Infrastructure</b>\n\n"
-            f"• <b>Uptime:</b> <code>{metrics['uptime']}</code>\n"
-            f"• <b>CPU Load:</b> <code>{metrics['cpu']}</code>\n"
-            f"• <b>RAM State:</b> <code>{metrics['ram']}</code>\n"
-            f"• <b>Storage Space:</b> <code>{metrics['disk']}</code>\n\n"
-            f"🐳 <b>Container Engine Topology:</b>\n"
-            f"• <b>Docker Socket:</b> {metrics['docker']}\n"
-            f"• <b>OS Layer Subsystem:</b> {metrics['wsl']}\n"
+            f"🖥️ <b>System Health Dashboard</b>\n\n"
+            
+            f"<b>🤖 Bot Status</b>\n"
+            f"• Uptime: <code>{metrics['bot']['uptime']}</code>\n\n"
+            
+            f"<b>💻 System Info</b>\n"
+            f"• OS: <code>{metrics['system']['os']}</code>\n"
+            f"• Kernel: {metrics['system']['wsl']}\n"
+            f"• System Uptime: <code>{metrics['system']['uptime']}</code>\n"
+            f"• Processes: <code>{metrics['system']['processes']}</code>\n\n"
+            
+            f"<b>⚡ CPU</b>\n"
+            f"• Usage: <code>{metrics['cpu']['usage']}</code>\n"
+            f"• Cores: <code>{metrics['cpu']['cores']}</code>\n"
+            f"• Frequency: <code>{metrics['cpu']['freq']}</code>\n"
+            f"• Load Avg: <code>{metrics['cpu']['load_avg']}</code>\n\n"
+            
+            f"<b>🧠 Memory</b>\n"
+            f"• RAM: <code>{metrics['ram']['percent']}</code> ({metrics['ram']['used']} / {metrics['ram']['total']})\n"
+            f"• Swap: <code>{metrics['swap']['percent']}</code> ({metrics['swap']['used']} / {metrics['swap']['total']})\n\n"
+            
+            f"<b>💾 Storage</b>\n"
+            + "\n".join(disk_lines) + "\n\n"
+            
+            f"<b>🌐 Network</b>\n"
+            f"• Sent: <code>{metrics['network']['bytes_sent']}</code>\n"
+            f"• Received: <code>{metrics['network']['bytes_recv']}</code>\n"
+            f"• Interfaces: {', '.join(f'<code>{iface}</code>' for iface in metrics['network']['interfaces'])}\n\n"
+            
+            f"<b>🐳 Docker</b>\n"
+            f"• Status: {metrics['docker']['status']}\n"
+            + "\n".join(container_lines)
         )
+        
         await status_msg.edit_text(dashboard, parse_mode="HTML")
-        await delete_after(status_msg, delay=30)
+        await delete_after(status_msg, delay=45)
     except Exception as e:
         await status_msg.edit_text(f"❌ Failed to extract hardware vectors: {e}")
         await delete_after(status_msg, delay=20)

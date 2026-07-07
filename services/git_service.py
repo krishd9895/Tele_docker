@@ -5,20 +5,21 @@ import asyncio
 import logging
 import paramiko
 from pathlib import Path
+from config.settings import runtime_settings
 
 logger = logging.getLogger(__name__)
 
 
 def _ssh_exec(command: str) -> tuple[int, str]:
-    """Run a command on the WSL host via SSH. Returns (exit_code, output)."""
-    ssh_user = os.getenv("HOST_SSH_USER")
-    ssh_pass = os.getenv("HOST_SSH_PASSWORD")
+    """Run a command on the host via SSH. Returns (exit_code, output)."""
+    ssh_user = runtime_settings.HOST_SSH_USER
+    ssh_pass = runtime_settings.HOST_SSH_PASSWORD
     if not ssh_user or not ssh_pass:
         return -1, "HOST_SSH_USER or HOST_SSH_PASSWORD not configured"
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
-        ssh.connect("127.0.0.1", username=ssh_user, password=ssh_pass, timeout=15)
+        ssh.connect(runtime_settings.HOST_SSH_HOST, port=runtime_settings.HOST_SSH_PORT, username=ssh_user, password=ssh_pass, timeout=15)
         _, stdout, stderr = ssh.exec_command(command, timeout=120)
         exit_code = stdout.channel.recv_exit_status()
         output = stdout.read().decode(errors="ignore") + stderr.read().decode(errors="ignore")

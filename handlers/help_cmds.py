@@ -15,17 +15,17 @@ from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from utils.msg_cleaner import delete_command
+from config.settings import runtime_settings
 
 help_router = Router()
 
-SECTIONS = [
-    (
-        "2fa",
-        "🔐 2FA Auth",
-        """🔐 <b>2FA Authentication</b>
+
+def _get_2fa_section_content() -> str:
+    duration_hours = runtime_settings.TOTP_SESSION_DURATION / 3600
+    return f"""🔐 <b>2FA Authentication</b>
 
 Some commands are protected by Google Authenticator (TOTP).
-Verify once and get <b>2 hours</b> of elevated access.
+Verify once and get <b>{duration_hours} hours</b> of elevated access.
 
 <b>Protected commands:</b>
 <code>/shell</code>, <code>/compose_up</code>, <code>/compose_down</code>, <code>/host</code>
@@ -51,11 +51,19 @@ Revoke your 2FA session immediately.
 3. Account name: <code>TeleDocker</code>
 4. Key: <i>(your TOTP_SECRET value from .env)</i>
 5. Type: Time-based → Done"""
-    ),
-    (
-        "git",
-        "🐙 Git Ops",
-        """🐙 <b>Git Operations</b>
+
+
+def _get_sections() -> list[tuple[str, str, str]]:
+    return [
+        (
+            "2fa",
+            "🔐 2FA Auth",
+            _get_2fa_section_content()
+        ),
+        (
+            "git",
+            "🐙 Git Ops",
+            """🐙 <b>Git Operations</b>
 
 Clone and update repositories on your WSL machine
 from Telegram — no terminal needed.
@@ -91,11 +99,11 @@ Each repo shows a 🐳 (container) or 🖥️ (host) badge.
 Comma-separated WSL paths the bot scans for git repos:
 <code>GIT_SCAN_PATHS=/home/d</code>
 <code>GIT_SCAN_PATHS=/home/d,/home/d/bots</code>"""
-    ),
-    (
-        "compose",
-        "🐳 Compose",
-        """🐳 <b>Docker Compose Stack Controls</b>
+        ),
+        (
+            "compose",
+            "🐳 Compose",
+            """🐳 <b>Docker Compose Stack Controls</b>
 
 Bring compose stacks up and down from your phone.
 Both commands <b>require 2FA</b> — run /verify first.
@@ -125,11 +133,11 @@ Same usage — button picker or direct path.
 <b>Host projects:</b>
 For projects on your WSL host (not inside the container),
 the bot runs <code>docker compose</code> via SSH automatically."""
-    ),
-    (
-        "tunnels",
-        "🌐 Tunnels",
-        """🌐 <b>Public Tunnel Management</b>
+        ),
+        (
+            "tunnels",
+            "🌐 Tunnels",
+            """🌐 <b>Public Tunnel Management</b>
 
 Two modes — both use cloudflared, no port forwarding needed.
 
@@ -175,11 +183,11 @@ Active tunnels (⏱ temp / ♾️ permanent) + DuckDNS IP
 <b>/revoke &lt;id&gt;</b> — stop one tunnel
 <b>/revoke_all</b> — kill everything (use after restart to
 clean up old orphaned processes)"""
-    ),
-    (
-        "duckdns",
-        "🦆 DuckDNS",
-        """🦆 <b>DuckDNS Auto IP Updater</b>
+        ),
+        (
+            "duckdns",
+            "🦆 DuckDNS",
+            """🦆 <b>DuckDNS Auto IP Updater</b>
 
 Keeps your <code>yourname.duckdns.org</code> subdomain
 always pointing at your current public IP.
@@ -210,11 +218,11 @@ Fully configurable from the bot — no manual .env editing needed.
 <b>Auto-update interval</b>
 Default: every 5 minutes.
 Change with: <code>/setenv DUCKDNS_UPDATE_INTERVAL 600</code>"""
-    ),
-    (
-        "env",
-        "⚙️ .env Settings",
-        """⚙️ <b>Settings Management</b>
+        ),
+        (
+            "env",
+            "⚙️ .env Settings",
+            """⚙️ <b>Settings Management</b>
 
 View and update bot configuration from Telegram.
 Both commands <b>require 2FA</b>.
@@ -261,11 +269,11 @@ No restart needed for most settings.
 <b>MongoDB (optional)</b>
 Set <code>MONGO_URI</code> in .env for cloud-synced settings.
 Without it, <code>data/settings.json</code> is used automatically."""
-    ),
-    (
-        "host",
-        "🖥️ Host Bridge",
-        """🖥️ <b>Host Bridge — /host command</b>
+        ),
+        (
+            "host",
+            "🖥️ Host Bridge",
+            """🖥️ <b>Host Bridge — /host command</b>
 
 Run shell commands directly on your <b>WSL Ubuntu host</b>
 from inside the Docker container, via SSH loopback.
@@ -303,16 +311,18 @@ In <code>.env</code>:
 <code>HOST_SSH_PASSWORD=yourpass</code>
 
 Output trimmed to 3800 chars if very long."""
-    ),
-]
+        ),
+    ]
 
-_SECTION_MAP = {s[0]: s for s in SECTIONS}
+
+def _get_section_map() -> dict[str, tuple[str, str, str]]:
+    return {s[0]: s for s in _get_sections()}
 
 
 def _main_menu_keyboard() -> InlineKeyboardMarkup:
     buttons = []
     row = []
-    for sid, label, _ in SECTIONS:
+    for sid, label, _ in _get_sections():
         row.append(InlineKeyboardButton(text=label, callback_data=f"hg:{sid}"))
         if len(row) == 2:
             buttons.append(row)
@@ -323,16 +333,17 @@ def _main_menu_keyboard() -> InlineKeyboardMarkup:
 
 
 def _section_keyboard(current_id: str) -> InlineKeyboardMarkup:
-    ids = [s[0] for s in SECTIONS]
+    sections = _get_sections()
+    ids = [s[0] for s in sections]
     idx = ids.index(current_id)
     nav = []
     if idx > 0:
         nav.append(InlineKeyboardButton(
-            text=f"◀ {SECTIONS[idx-1][1]}", callback_data=f"hg:{ids[idx-1]}"
+            text=f"◀ {sections[idx-1][1]}", callback_data=f"hg:{ids[idx-1]}"
         ))
     if idx < len(ids) - 1:
         nav.append(InlineKeyboardButton(
-            text=f"{SECTIONS[idx+1][1]} ▶", callback_data=f"hg:{ids[idx+1]}"
+            text=f"{sections[idx+1][1]} ▶", callback_data=f"hg:{ids[idx+1]}"
         ))
     buttons = []
     if nav:
@@ -368,7 +379,8 @@ async def cb_help_section(call: CallbackQuery):
         )
         return
 
-    section = _SECTION_MAP.get(section_id)
+    section_map = _get_section_map()
+    section = section_map.get(section_id)
     if not section:
         await call.message.answer("⚠️ Section not found.")
         return
