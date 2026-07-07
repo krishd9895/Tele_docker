@@ -7,6 +7,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from utils.msg_cleaner import delete_command, delete_after, auto_clean
 from utils.ssh_helper import get_ssh_creds, get_ssh_host, ssh_exec as _ssh_exec_helper
+from middlewares.totp_auth import require_2fa
 
 file_router = Router()
 
@@ -208,6 +209,7 @@ def _dl_browser_text(path: str, dirs: list[str], files: list[str], page: int) ->
 
 
 @file_router.message(Command("download"))
+@require_2fa
 async def cmd_download(message: Message):
     """Open folder browser to pick a file to download."""
     await delete_command(message)
@@ -348,6 +350,7 @@ async def cb_dl_cancel(call: CallbackQuery):
 # ── /upload ───────────────────────────────────────────────────────────────────
 
 @file_router.message(Command("upload"))
+@require_2fa
 async def cmd_upload_prompt(message: Message, state: FSMContext):
     """Open folder browser so user picks a destination first."""
     await delete_command(message)
