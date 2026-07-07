@@ -66,25 +66,38 @@ def execute_on_host_machine_streaming(command: str, cwd: str | None = None, stop
     full_cmd = command
     if cwd:
         full_cmd = f'cd "{cwd}" && {command}'
+    # Wrap command to get PID and allow killing it
+    wrapped_cmd = f"sh -c 'echo $$; exec {full_cmd}'"
     output_lines = []
     was_stopped = False
     exit_code = -1
+    process_pid = None
 
     try:
         ssh.connect(host, port=port, username=user, password=password, timeout=15)
-        stdin, stdout, stderr = ssh.exec_command(full_cmd)
+        stdin, stdout, stderr = ssh.exec_command(wrapped_cmd)
 
         # Read output in a loop
-        while not stop_event.is_set():
+        first_line = True
+        while True:
+            # Check stop event first
+            if stop_event.is_set():
+                break
+
             # Read available data
             if stdout.channel.recv_ready():
                 chunk = stdout.read(4096)
                 if chunk:
                     text = chunk.decode(errors="ignore")
                     lines = text.splitlines(True)  # Keep newlines
-                    output_lines.extend(lines)
-                    if output_line_queue:
-                        for line in lines:
+                    for line in lines:
+                        if first_line and line.strip().isdigit():
+                            process_pid = line.strip()
+                            first_line = False
+                            continue
+                        first_line = False
+                        output_lines.append(line)
+                        if output_line_queue:
                             output_line_queue.put(line)
             if stderr.channel.recv_ready():
                 chunk = stderr.read(4096)
@@ -119,7 +132,15 @@ def execute_on_host_machine_streaming(command: str, cwd: str | None = None, stop
         # If stopped, try to kill the process
         if stop_event.is_set():
             was_stopped = True
-            # Try to kill the process (this is a best-effort)
+            # Try multiple ways to kill the process
+            if process_pid:
+                try:
+                    # Kill the PID and its children
+                    kill_cmd = f'pkill -TERM -P {process_pid} 2>/dev/null || kill -TERM {process_pid} 2>/dev/null || kill -9 {process_pid} 2>/dev/null; true'
+                    ssh.exec_command(kill_cmd)
+                except:
+                    pass
+            # Also try sending Ctrl+C
             try:
                 stdin.write(chr(3))  # Send Ctrl+C
                 stdin.flush()
