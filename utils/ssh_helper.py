@@ -62,6 +62,9 @@ def ssh_exec(command: str, timeout: int = 60) -> tuple[int, str]:
     Returns (exit_code, output_string).
     Output capped at SSH_OUTPUT_CAP bytes.
     """
+    import threading
+    import queue
+
     user, password = get_ssh_creds()
     if not user or not password:
         return -1, "HOST_SSH_USER or HOST_SSH_PASSWORD not configured in .env"
@@ -69,27 +72,55 @@ def ssh_exec(command: str, timeout: int = 60) -> tuple[int, str]:
     host, port = get_ssh_host()
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    
+    result_queue = queue.Queue()
+    
+    def _execute():
+        try:
+            ssh.connect(host, port=port, username=user, password=password, timeout=15)
+            _, stdout, stderr = ssh.exec_command(command, timeout=timeout)
+            
+            # Read with size cap
+            stdout_bytes = b""
+            for chunk in iter(lambda: stdout.read(4096), b""):
+                stdout_bytes += chunk
+                if len(stdout_bytes) >= SSH_OUTPUT_CAP:
+                    stdout_bytes = stdout_bytes[:SSH_OUTPUT_CAP]
+                    stdout_bytes += b"\n[OUTPUT CAPPED AT 512KB]"
+                    break
+            
+            stderr_bytes = stderr.read(min(4096, SSH_OUTPUT_CAP))
+            output = stdout_bytes.decode(errors="ignore") + stderr_bytes.decode(errors="ignore")
+            
+            # Try to get exit code
+            try:
+                exit_code = stdout.channel.recv_exit_status()
+            except:
+                exit_code = -1
+            
+            result_queue.put((exit_code, output))
+        except Exception as e:
+            result_queue.put((-1, str(e)))
+        finally:
+            try:
+                ssh.close()
+            except:
+                pass
+    
+    thread = threading.Thread(target=_execute, daemon=True)
+    thread.start()
+    
     try:
-        ssh.connect(host, port=port, username=user, password=password, timeout=15)
-        _, stdout, stderr = ssh.exec_command(command, timeout=timeout)
-        exit_code = stdout.channel.recv_exit_status()
+        exit_code, output = result_queue.get(timeout=timeout)
+        return exit_code, output
+    except queue.Empty:
+        # Timeout!
+        try:
+            ssh.close()
+        except:
+            pass
+        return -1, f"Command timed out after {timeout} seconds"
 
-        # Read with size cap
-        stdout_bytes = b""
-        for chunk in iter(lambda: stdout.read(4096), b""):
-            stdout_bytes += chunk
-            if len(stdout_bytes) >= SSH_OUTPUT_CAP:
-                stdout_bytes = stdout_bytes[:SSH_OUTPUT_CAP]
-                stdout_bytes += b"\n[OUTPUT CAPPED AT 512KB]"
-                break
-
-        stderr_bytes = stderr.read(min(4096, SSH_OUTPUT_CAP))
-        output = stdout_bytes.decode(errors="ignore") + stderr_bytes.decode(errors="ignore")
-        return exit_code, output.strip()
-    except Exception as e:
-        return -1, str(e)
-    finally:
-        ssh.close()
 
 
 async def ssh_exec_async(command: str, timeout: int = 60) -> tuple[int, str]:
