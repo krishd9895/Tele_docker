@@ -48,20 +48,18 @@ class UploadStates(StatesGroup):
 # ── SSH helpers ───────────────────────────────────────────────────────────────
 
 def _list_host_dirs(path: str) -> list[str]:
-    """Return sorted list of subdirectory full paths via SSH."""
+    """Return sorted list of subdirectory and symlink-to-directory full paths via SSH."""
     user, _ = get_ssh_creds()
     if not user:
         return []
+    # Find real directories AND symlinks to directories (test -d)
     code, out = _ssh_exec_helper(
-        f'find "{path}" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort',
+        f'cd "{path}" && for item in *; do [ -e "$item" ] && [ ! "$(echo "$item" | cut -c1)" = "." ] && ( [ -d "$item" ] || [ -L "$item" ] && [ -d "$item" ] ) && echo "$(pwd)/$item"; done 2>/dev/null | sort',
         timeout=15
     )
     if code != 0 or not out.strip():
         return []
-    return [
-        line.strip() for line in out.splitlines()
-        if line.strip() and not line.strip().split("/")[-1].startswith(".")
-    ]
+    return [line.strip() for line in out.splitlines() if line.strip()]
 
 
 # ── Keyboard builders ─────────────────────────────────────────────────────────
@@ -131,25 +129,25 @@ def _browser_text(path: str, subdirs: list[str], page: int) -> str:
 # ── /download ─────────────────────────────────────────────────────────────────
 
 def _list_host_entries(path: str) -> tuple[list[str], list[str]]:
-    """Return (subdirs, files) at path on the host via SSH."""
+    """Return (subdirs, files) at path on the host via SSH (including symlinks)."""
     user, _ = get_ssh_creds()
     if not user:
         return [], []
 
-    _, dout = _ssh_exec_helper(
-        f'find "{path}" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort', 15
+    # Use a loop to categorize each item
+    code, out = _ssh_exec_helper(
+        f'cd "{path}" && for item in *; do [ -e "$item" ] && [ ! "$(echo "$item" | cut -c1)" = "." ] && ( [ -d "$item" ] || [ -L "$item" ] && [ -d "$item" ] ) && echo "D:$(pwd)/$item" || ( [ -f "$item" ] || [ -L "$item" ] && [ -f "$item" ] ) && echo "F:$(pwd)/$item"; done 2>/dev/null | sort',
+        timeout=15
     )
-    _, fout = _ssh_exec_helper(
-        f'find "{path}" -maxdepth 1 -mindepth 1 -type f 2>/dev/null | sort', 15
-    )
-    dirs = [
-        l.strip() for l in dout.splitlines()
-        if l.strip() and not l.strip().split("/")[-1].startswith(".")
-    ]
-    files = [
-        l.strip() for l in fout.splitlines()
-        if l.strip() and not l.strip().split("/")[-1].startswith(".")
-    ]
+    dirs = []
+    files = []
+    if code == 0 and out.strip():
+        for line in out.splitlines():
+            line = line.strip()
+            if line.startswith("D:"):
+                dirs.append(line[2:])
+            elif line.startswith("F:"):
+                files.append(line[2:])
     return dirs, files
 
 
