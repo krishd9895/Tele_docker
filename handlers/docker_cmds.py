@@ -429,7 +429,7 @@ async def _do_docker_build(message: Message, repo_path: str):
     status = await message.answer(
         f"🔨 <b>Build Pipeline: {project_name}</b>\n\n"
         f"📂 <code>{repo_path}</code>\n\n"
-        f"⏳ Step 1/4 — Pulling latest changes...",
+        f"⏳ Step 1/3 — Pulling latest changes...",
         parse_mode="HTML"
     )
 
@@ -448,31 +448,18 @@ async def _do_docker_build(message: Message, repo_path: str):
 
     await status.edit_text(
         f"🔨 <b>Build Pipeline: {project_name}</b>\n\n"
-        f"✅ Step 1/4 — Pull: <code>{_html.escape(pull_summary)}</code>\n\n"
-        f"⏳ Step 2/4 — Bringing stack down...",
+        f"✅ Step 1/3 — Pull: <code>{_html.escape(pull_summary)}</code>\n\n"
+        f"⏳ Step 2/3 — Building images...",
         parse_mode="HTML"
     )
 
-    # ── Step 2: compose down ──────────────────────────────────────────────────
-    down_ok, down_out = await docker_engine.compose_down(repo_path)
-    # compose down failure is non-fatal (stack might not be running)
-    down_note = "✅ Stack stopped." if down_ok else "⚠️ Down skipped (stack not running)."
-
-    await status.edit_text(
-        f"🔨 <b>Build Pipeline: {project_name}</b>\n\n"
-        f"✅ Step 1/4 — Pull done\n"
-        f"{down_note}\n\n"
-        f"⏳ Step 3/4 — Building images...",
-        parse_mode="HTML"
-    )
-
-    # ── Step 3: compose build ─────────────────────────────────────────────────
+    # ── Step 2: compose build ─────────────────────────────────────────────────
     build_ok, build_out = await docker_engine.compose_build(repo_path)
 
     if not build_ok:
-        trimmed = _html.escape(build_out[-2000:] if len(build_out) > 2000 else build_out)
+        trimmed = _html.escape(build_out[-2000:] if len(build_out) > 2000 else build_out)        
         await status.edit_text(
-            f"❌ <b>Build failed at Step 3/4</b>\n\n"
+            f"❌ <b>Build failed at Step 2/3</b>\n\n"
             f"<pre>{trimmed}</pre>",
             parse_mode="HTML"
         )
@@ -480,14 +467,13 @@ async def _do_docker_build(message: Message, repo_path: str):
 
     await status.edit_text(
         f"🔨 <b>Build Pipeline: {project_name}</b>\n\n"
-        f"✅ Step 1/4 — Pull done\n"
-        f"{down_note}\n"
-        f"✅ Step 3/4 — Build complete\n\n"
-        f"⏳ Step 4/4 — Starting stack...",
+        f"✅ Step 1/3 — Pull done\n"
+        f"✅ Step 2/3 — Build complete\n\n"  
+        f"⏳ Step 3/3 — Starting stack...",  
         parse_mode="HTML"
     )
 
-    # ── Step 4: compose up -d ─────────────────────────────────────────────────
+    # ── Step 3: compose up -d ─────────────────────────────────────────────────
     up_ok, up_out = await docker_engine.compose_up(repo_path)
     up_trimmed = _html.escape(up_out[-1000:] if len(up_out) > 1000 else up_out)
 
@@ -495,9 +481,8 @@ async def _do_docker_build(message: Message, repo_path: str):
         await status.edit_text(
             f"✅ <b>Build Pipeline Complete: {project_name}</b>\n\n"
             f"✅ git pull\n"
-            f"{down_note}\n"
-            f"✅ docker compose build\n"
-            f"✅ docker compose up -d\n\n"
+            f"✅ docker compose build\n"       
+            f"✅ docker compose up -d\n\n"     
             f"<pre>{up_trimmed}</pre>",
             parse_mode="HTML"
         )
