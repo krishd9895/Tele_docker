@@ -7,6 +7,7 @@ from middlewares.totp_auth import (
     session_time_left, _session_duration_label,
 )
 from utils.msg_cleaner import delete_command, delete_after, auto_clean
+from config.settings import runtime_settings
 
 auth_router = Router()
 
@@ -16,17 +17,33 @@ async def cmd_verify(message: Message):
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
         reply = await message.answer(
-            "⚠️ <b>Usage:</b> <code>/verify &lt;6-digit-code&gt;</code>\n\n"
+            "⚠️ <b>Usage:</b> <code>/verify &lt;6-digit-code-or-password&gt;</code>\n\n"
             "Open Google Authenticator and enter the current code for <b>TeleDocker</b>.",
             parse_mode="HTML"
         )
         await auto_clean(message, reply, reply_delay=15)
         return
 
-    code = args[1].strip()
+    code_or_password = args[1].strip()
     await delete_command(message)
 
-    if verify_code(code):
+    # Check if we have a secret admin password, and if this matches it
+    if runtime_settings.SECRET_ADMIN_PASSWORD and code_or_password == runtime_settings.SECRET_ADMIN_PASSWORD:
+        expiry = open_session(message.from_user.id)
+        expiry_str = time.strftime("%H:%M:%S", time.localtime(expiry))
+        duration = _session_duration_label()
+        reply = await message.answer(
+            f"✅ <b>Admin Password Verified</b>\n\n"
+            f"Elevated access granted for <b>{duration}</b>.\n"
+            f"Session expires at <code>{expiry_str}</code>.\n\n"
+            f"Use /lock to revoke early.",
+            parse_mode="HTML"
+        )
+        await delete_after(reply, delay=20)
+        return
+
+    # Otherwise check TOTP code
+    if verify_code(code_or_password):
         expiry = open_session(message.from_user.id)
         expiry_str = time.strftime("%H:%M:%S", time.localtime(expiry))
         duration = _session_duration_label()
@@ -40,7 +57,7 @@ async def cmd_verify(message: Message):
         await delete_after(reply, delay=20)
     else:
         reply = await message.answer(
-            "❌ <b>Invalid or expired code.</b>\n\n"
+            "❌ <b>Invalid or expired code/password.</b>\n\n"
             "Make sure your device clock is synced and try again.\n"
             "Codes are valid for 30 seconds.",
             parse_mode="HTML"
