@@ -483,6 +483,23 @@ async def _do_docker_build(message: Message, repo_path: str):
     is_self_restart = path_not_in_container  # host paths always go via SSH
 
     if is_self_restart:
+        # Auto-detect manifest on host first
+        manifest_name = None
+        for cf in ["docker-compose.yml", "docker-compose.yaml", "compose.yaml", "compose.yml"]:
+            check_cmd = f'test -f "{repo_path}/{cf}" && echo "{cf}"'
+            from utils.ssh_helper import ssh_exec
+            code, out = await asyncio.to_thread(ssh_exec, check_cmd)
+            if code == 0 and out.strip():
+                manifest_name = out.strip()
+                break
+        
+        if not manifest_name:
+            await status.edit_text(
+                f"❌ <b>Error: No compose file found in {project_name}</b>",
+                parse_mode="HTML"
+            )
+            return
+
         # Send completion message BEFORE triggering restart
         await status.edit_text(
             f"✅ <b>Build Pipeline Complete: {project_name}</b>\n\n"
@@ -494,8 +511,17 @@ async def _do_docker_build(message: Message, repo_path: str):
         )
         # Small delay to ensure message is delivered before the bot dies
         await asyncio.sleep(2)
-        # Fire-and-forget — don't await the result (we'll be dead)
-        asyncio.create_task(docker_engine.compose_up(repo_path))
+        # Fire-and-forget — run directly via SSH without waiting
+        from utils.ssh_helper import ssh_exec
+        cmd = f'cd "{repo_path}" && docker compose -f "{manifest_name}" up -d 2>&1'
+        # Run in a separate thread without waiting for the result
+        import threading
+        def _run_in_background():
+            try:
+                ssh_exec(cmd, timeout=300)
+            except:
+                pass
+        threading.Thread(target=_run_in_background, daemon=True).start()
     else:
         # Container-local project — safe to await
         up_ok, up_out = await docker_engine.compose_up(repo_path)
