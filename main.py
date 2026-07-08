@@ -35,6 +35,9 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 
+# --- Host Command Configuration ---
+HOST_COMMAND_UPDATE_INTERVAL = 30  # Seconds between status updates for /host command
+
 # --- Define Hidden Host Execution Core Logic ---
 # Store active command info: user_id -> { 'ssh_client': paramiko.SSHClient, 'stdout', 'stderr', 'stop_event': threading.Event }
 _active_commands: dict[int, dict] = {}
@@ -218,7 +221,7 @@ async def main():
             [InlineKeyboardButton(text="⏹️ Stop Command", callback_data="stop_host_cmd")]
         ])
         status_message = await message.answer(
-            f"⏳ <b>Running</b> <code>{safe_cmd}</code>...\n\nOutput will update every minute.\n<i>(Click Stop to end the command)</i>",
+            f"⏳ <b>Running</b> <code>{safe_cmd}</code>...\n\nOutput will update every {HOST_COMMAND_UPDATE_INTERVAL} seconds.\n<i>(Click Stop to end the command)</i>",
             parse_mode="HTML",
             reply_markup=keyboard
         )
@@ -269,9 +272,9 @@ async def main():
                     except queue.Empty:
                         break
 
-                # Check if we need to update (every minute)
+                # Check if we need to update
                 current_time = time.time()
-                if current_time - last_update_time >= 60:
+                if current_time - last_update_time >= HOST_COMMAND_UPDATE_INTERVAL:
                     state_data = await state.get_data()
                     elapsed = int(current_time - state_data.get("start_time", time.time()))
                     elapsed_min = elapsed // 60
