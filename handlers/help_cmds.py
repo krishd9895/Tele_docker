@@ -273,16 +273,16 @@ Without it, <code>data/settings.json</code> is used automatically."""
         (
             "host",
             "🖥️ Host Bridge",
-            """🖥️ <b>Host Bridge — /host command</b>
+            """🖥️ <b>Host Bridge — /host & /host_cd commands</b>
 
 Run shell commands directly on your <b>WSL Ubuntu host</b>
 from inside the Docker container, via SSH loopback.
 
 <b>Requires 2FA</b> — run /verify first.
-Hidden command — not in the /help menu.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
-<b>Usage:</b> <code>/host &lt;any shell command&gt;</code>
+<b>/host &lt;any shell command&gt;</b>
+Run a command on the host (always starts in home directory).
 
 <i>Examples:</i>
 <code>/host whoami</code>
@@ -293,12 +293,20 @@ Hidden command — not in the /help menu.
 <code>/host docker ps</code>
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
+<b>/host_cd &lt;path&gt; &lt;command&gt;</b>
+Run a command in a specific directory on the host.
+
+<i>Examples:</i>
+<code>/host_cd /home/d/projects ls -la</code>
+<code>/host_cd /var/log tail -n 50 syslog</code>
+
+━━━━━━━━━━━━━━━━━━━━━━━━
 <b>/host vs /shell:</b>
 
 <code>/shell</code> → inside the Docker container
   Filesystem: <code>/app/</code> only
 
-<code>/host</code> → your WSL Ubuntu machine
+<code>/host</code> / <code>/host_cd</code> → your WSL Ubuntu machine
   Filesystem: <code>/home/d/</code> and everything else
   Can run systemctl, see all processes, etc.
 
