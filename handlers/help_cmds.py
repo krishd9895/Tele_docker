@@ -315,7 +315,7 @@ Run a command in a specific directory on the host.
 <code>sudo service ssh start</code> on WSL
 
 In <code>.env</code>:
-<code>HOST_SSH_USER=d</code>
+<code>HOST_SSH_USER=Ubuntu</code>
 <code>HOST_SSH_PASSWORD=yourpass</code>
 
 Output trimmed to 3800 chars if very long."""
