@@ -32,10 +32,28 @@ class InfrastructureMonitoringService:
         except:
             swap = None
 
-        # Disks
+        # Disks — filter out Docker-internal and system mountpoints
         disks = []
         try:
             for part in psutil.disk_partitions():
+                # Skip Docker-specific, system, and bind mounts
+                skip_mounts = [
+                    "/app/.env", "/app/data", "/etc/resolv.conf", "/etc/hostname",
+                    "/etc/hosts", "/proc", "/sys", "/dev", "/tmp", "/run",
+                    "/var/run", "/var/lib/docker"
+                ]
+                skip_fstypes = [
+                    "tmpfs", "devtmpfs", "devpts", "sysfs", "proc", "cgroup",
+                    "overlay", "aufs", "shm", "mqueue"
+                ]
+                if part.mountpoint in skip_mounts:
+                    continue
+                if part.fstype in skip_fstypes:
+                    continue
+                # Skip any mountpoint that starts with /proc, /sys, /dev
+                if part.mountpoint.startswith(("/proc/", "/sys/", "/dev/")):
+                    continue
+                
                 try:
                     usage = await loop.run_in_executor(None, shutil.disk_usage, part.mountpoint)
                     disks.append({
