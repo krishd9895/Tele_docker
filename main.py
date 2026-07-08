@@ -80,8 +80,23 @@ def execute_on_host_machine_streaming(command: str, cwd: str | None = None, stop
         # Read output in a loop
         first_line = True
         while True:
-            # Check stop event first
+            # Check stop event FIRST every time and kill immediately
             if stop_event.is_set():
+                was_stopped = True
+                # Try multiple ways to kill the process RIGHT AWAY
+                if process_pid:
+                    try:
+                        # Kill the PID and its children
+                        kill_cmd = f'pkill -TERM -P {process_pid} 2>/dev/null || kill -TERM {process_pid} 2>/dev/null || kill -9 {process_pid} 2>/dev/null; true'
+                        ssh.exec_command(kill_cmd)
+                    except:
+                        pass
+                # Also try sending Ctrl+C
+                try:
+                    stdin.write(chr(3))  # Send Ctrl+C
+                    stdin.flush()
+                except:
+                    pass
                 break
 
             # Read available data
@@ -127,26 +142,7 @@ def execute_on_host_machine_streaming(command: str, cwd: str | None = None, stop
                         for line in remaining_lines:
                             output_line_queue.put(line)
                 break
-            time.sleep(0.1)
-
-        # If stopped, try to kill the process
-        if stop_event.is_set():
-            was_stopped = True
-            # Try multiple ways to kill the process
-            if process_pid:
-                try:
-                    # Kill the PID and its children
-                    kill_cmd = f'pkill -TERM -P {process_pid} 2>/dev/null || kill -TERM {process_pid} 2>/dev/null || kill -9 {process_pid} 2>/dev/null; true'
-                    ssh.exec_command(kill_cmd)
-                except:
-                    pass
-            # Also try sending Ctrl+C
-            try:
-                stdin.write(chr(3))  # Send Ctrl+C
-                stdin.flush()
-                time.sleep(0.5)
-            except:
-                pass
+            time.sleep(0.01)  # Shorter sleep for faster stop event check
     except Exception as e:
         error_line = f"\nError: {e}"
         output_lines.append(error_line)
