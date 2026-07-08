@@ -1,9 +1,10 @@
 import asyncio
 import psutil
-import shutil
 import platform
 import time
+import json
 from services.docker_service import docker_engine
+from utils.ssh_helper import ssh_exec_async
 
 
 class InfrastructureMonitoringService:
@@ -32,41 +33,73 @@ class InfrastructureMonitoringService:
         except:
             swap = None
 
-        # Disks — filter out Docker-internal and system mountpoints
+        # Disks — get from host via SSH first, fall back to container-local
         disks = []
         try:
-            for part in psutil.disk_partitions():
-                # Skip Docker-specific, system, and bind mounts
-                skip_mounts = [
-                    "/app/.env", "/app/data", "/etc/resolv.conf", "/etc/hostname",
-                    "/etc/hosts", "/proc", "/sys", "/dev", "/tmp", "/run",
-                    "/var/run", "/var/lib/docker"
-                ]
-                skip_fstypes = [
-                    "tmpfs", "devtmpfs", "devpts", "sysfs", "proc", "cgroup",
-                    "overlay", "aufs", "shm", "mqueue"
-                ]
-                if part.mountpoint in skip_mounts:
-                    continue
-                if part.fstype in skip_fstypes:
-                    continue
-                # Skip any mountpoint that starts with /proc, /sys, /dev
-                if part.mountpoint.startswith(("/proc/", "/sys/", "/dev/")):
-                    continue
-                
-                try:
-                    usage = await loop.run_in_executor(None, shutil.disk_usage, part.mountpoint)
-                    disks.append({
-                        "mountpoint": part.mountpoint,
-                        "total": usage.total,
-                        "used": usage.used,
-                        "free": usage.free,
-                        "percent": (usage.used / usage.total) * 100
-                    })
-                except:
-                    pass
-        except:
-            pass
+            # Run a Python script on the host to get disk info
+            host_script = '''
+import psutil
+import json
+disks = []
+for part in psutil.disk_partitions():
+    skip_mounts = ['/proc', '/sys', '/dev', '/tmp', '/run', '/var/run', '/var/lib/docker']
+    skip_fstypes = ['tmpfs', 'devtmpfs', 'devpts', 'sysfs', 'proc', 'cgroup', 'overlay', 'aufs', 'shm', 'mqueue']
+    if part.mountpoint in skip_mounts:
+        continue
+    if part.fstype in skip_fstypes:
+        continue
+    if part.mountpoint.startswith(('/proc/', '/sys/', '/dev/')):
+        continue
+    try:
+        usage = psutil.disk_usage(part.mountpoint)
+        disks.append({
+            "mountpoint": part.mountpoint,
+            "total": usage.total,
+            "used": usage.used,
+            "free": usage.free,
+            "percent": (usage.used / usage.total) * 100
+        })
+    except:
+        pass
+print(json.dumps(disks))
+'''.strip()
+            # Escape single quotes for the shell command
+            host_script_escaped = host_script.replace("'", "'\"'\"'")
+            exit_code, output = await ssh_exec_async(f"python3 -c '{host_script_escaped}'", timeout=30)
+            if exit_code == 0:
+                disks = json.loads(output.strip())
+        except Exception:
+            # If SSH fails, try container-local disks (filtered)
+            try:
+                for part in psutil.disk_partitions():
+                    skip_mounts = [
+                        "/app/.env", "/app/data", "/etc/resolv.conf", "/etc/hostname",
+                        "/etc/hosts", "/proc", "/sys", "/dev", "/tmp", "/run",
+                        "/var/run", "/var/lib/docker"
+                    ]
+                    skip_fstypes = [
+                        "tmpfs", "devtmpfs", "devpts", "sysfs", "proc", "cgroup",
+                        "overlay", "aufs", "shm", "mqueue"
+                    ]
+                    if part.mountpoint in skip_mounts:
+                        continue
+                    if part.fstype in skip_fstypes:
+                        continue
+                    if part.mountpoint.startswith(("/proc/", "/sys/", "/dev/")):
+                        continue
+                    try:
+                        usage = psutil.disk_usage(part.mountpoint)
+                        disks.append({
+                            "mountpoint": part.mountpoint,
+                            "total": usage.total,
+                            "used": usage.used,
+                            "free": usage.free,
+                            "percent": (usage.used / usage.total) * 100
+                        })
+                    except:
+                        pass
+            except:
+                pass
 
         # Network
         net_io = None
