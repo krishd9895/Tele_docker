@@ -484,6 +484,9 @@ async def _do_docker_build(message: Message, repo_path: str):
     path_not_in_container = not __import__('pathlib').Path(repo_path).exists()
     is_self_restart = path_not_in_container  # host paths always go via SSH
 
+    # Check if this is our own TeleDocker repo (so we can only restart tg-manager-bot)
+    is_teledocker_repo = project_name == "Tele_docker" or project_name == "Tele_docker-main"
+
     if is_self_restart:
         # Auto-detect manifest on host first
         manifest_name = None
@@ -515,7 +518,11 @@ async def _do_docker_build(message: Message, repo_path: str):
         await asyncio.sleep(2)
         # Fire-and-forget — run directly via SSH without waiting
         from utils.ssh_helper import ssh_exec
-        cmd = f'cd "{repo_path}" && docker compose -f "{manifest_name}" up -d 2>&1'
+        if is_teledocker_repo:
+            # For our own repo: only restart tg-manager-bot, leave rescue bot running!
+            cmd = f'cd "{repo_path}" && docker compose -f "{manifest_name}" up -d --no-deps tg-manager-bot 2>&1'
+        else:
+            cmd = f'cd "{repo_path}" && docker compose -f "{manifest_name}" up -d 2>&1'
         # Run in a separate thread without waiting for the result
         import threading
         def _run_in_background():

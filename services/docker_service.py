@@ -152,8 +152,12 @@ class DockerOrchestrationEngine:
     async def compose_build(self, project_path: str, manifest_name: str = None) -> tuple[bool, str]:
         """Run docker compose build in the given path."""
         path = Path(project_path)
+        project_name = str(path).rstrip("/").split("/")[-1]
+        is_teledocker_repo = project_name == "Tele_docker" or project_name == "Tele_docker-main"
 
         if not path.exists():
+            if is_teledocker_repo:
+                return await self._compose_cmd_on_host(project_path, "build tg-manager-bot", manifest_name)
             return await self._compose_cmd_on_host(project_path, "build", manifest_name)
 
         if not manifest_name:
@@ -165,8 +169,11 @@ class DockerOrchestrationEngine:
             return False, "No compose file found in that directory."
 
         try:
+            cmd_parts = ["docker", "compose", "-f", manifest_name, "build"]
+            if is_teledocker_repo:
+                cmd_parts.append("tg-manager-bot")
             proc = await asyncio.create_subprocess_exec(
-                "docker", "compose", "-f", manifest_name, "build",
+                *cmd_parts,
                 cwd=str(path),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
@@ -184,9 +191,13 @@ class DockerOrchestrationEngine:
     async def compose_up(self, project_path: str, manifest_name: str = None) -> tuple[bool, str]:
         """Run docker compose up -d. Routes to host via SSH if path not in container."""
         path = Path(project_path)
+        project_name = str(path).rstrip("/").split("/")[-1]
+        is_teledocker_repo = project_name == "Tele_docker" or project_name == "Tele_docker-main"
 
         if not path.exists():
             # Path not in container — run on host
+            if is_teledocker_repo:
+                return await self._compose_cmd_on_host(project_path, "up -d --no-deps tg-manager-bot", manifest_name)
             return await self._compose_cmd_on_host(project_path, "up -d", manifest_name)
 
         if not manifest_name:
@@ -198,8 +209,11 @@ class DockerOrchestrationEngine:
             return False, "No compose file found in that directory."
 
         try:
+            cmd_parts = ["docker", "compose", "-f", manifest_name, "up", "-d"]
+            if is_teledocker_repo:
+                cmd_parts.extend(["--no-deps", "tg-manager-bot"])
             proc = await asyncio.create_subprocess_exec(
-                "docker", "compose", "-f", manifest_name, "up", "-d",
+                *cmd_parts,
                 cwd=str(path),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
