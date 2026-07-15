@@ -320,6 +320,72 @@ In <code>.env</code>:
 
 Output trimmed to 3800 chars if very long."""
         ),
+        (
+            "pydeploy",
+            "🐍 Py Deploy",
+            """🐍 <b>Python App Deployments</b>
+
+Deploy a plain Python project (no Docker) straight from Telegram —
+it runs 24/7 on your WSL host with its own virtual environment and
+restarts itself automatically if it ever crashes.
+
+<b>Requires 2FA</b> — run /verify first.
+
+━━━━━━━━━━━━━━━━━━━━━━━━
+<b>/pydeploy &lt;github_url&gt; [entry_file.py]</b>
+Deploy directly from a GitHub URL.
+
+• Public repos — works directly
+• Private repos — embed a token in the URL yourself, e.g.
+  <code>https://TOKEN@github.com/user/repo.git</code>
+  (never echoed back in chat)
+• Entry file is auto-detected (<code>main.py</code>, <code>app.py</code>,
+  <code>bot.py</code>, <code>run.py</code>, <code>server.py</code>) or pass
+  it explicitly as the second argument.
+
+<i>Example:</i>
+<code>/pydeploy https://github.com/user/mybot</code>
+
+━━━━━━━━━━━━━━━━━━━━━━━━
+<b>/pydeploy</b> (no arguments)
+Prompts you to send a GitHub URL <b>or</b> upload a
+<code>.zip</code>/<code>.rar</code> archive of your project instead.
+
+━━━━━━━━━━━━━━━━━━━━━━━━
+<b>Projects with a Dockerfile/compose file:</b>
+Not rejected — you'll be asked to either use /deploy or /compose_up
+for full Docker support, or continue right there as a plain Python
+app by optionally supplying a custom <b>build command</b>, <b>run
+command</b>, and <code>.env</code> content. Skip any of them; skipping
+the run command falls back to auto-detecting the entry point.
+
+━━━━━━━━━━━━━━━━━━━━━━━━
+<b>/pyps</b>
+Lists every Python deployment with its status. Tap a deployment to:
+▶ Start · ⏹ Stop · 🔄 Restart · 📄 View logs
+
+Deployments left running are auto-restarted if they crash. Stopping
+one via ⏹ turns auto-restart off for it until you tap ▶ again.
+
+<b>Updating code:</b>
+⬇️ <b>Git Pull Update</b> — pulls the latest commit (git-sourced deployments
+only), then rebuilds and restarts with your existing build/run
+command and <code>.env</code>.
+📤 <b>Upload New Version</b> — send a fresh <code>.zip</code>/<code>.rar</code> to fully replace the
+code (keeps the virtual environment, logs, and <code>.env</code>), then rebuilds
+and restarts.
+
+<b>Removing a deployment:</b>
+🗑️ <b>Delete</b> — asks for confirmation, then stops the process and
+permanently removes its files, virtual environment, and logs from
+the host.
+
+━━━━━━━━━━━━━━━━━━━━━━━━
+<b>Under the hood:</b>
+Each deployment gets its own folder + virtual environment on the
+WSL host under <code>PY_DEPLOY_ROOT</code> (default
+<code>~/py_deployments</code>, configurable in <code>.env</code>)."""
+        ),
     ]
 
 

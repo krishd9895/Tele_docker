@@ -26,6 +26,10 @@ from handlers.duckdns_cmds import duckdns_router
 from handlers.env_cmds import env_router
 from services.duckdns_service import duckdns_service
 
+from handlers.pydeploy_cmds import pydeploy_router
+from database.pydeploy_models import init_pydeploy_db
+from services import pydeploy_service
+
 from utils.watchdog import ResiliencyWatchdogEngine
 
 # --- Setup System Logging Profiles ---
@@ -163,6 +167,7 @@ def execute_on_host_machine_streaming(command: str, cwd: str | None = None, stop
 async def main():
     logging.info("Validating configuration matrices and initializing SQLite metadata layers...")
     init_db()
+    init_pydeploy_db()
 
     # Load and apply mutable settings from MongoDB or settings.json
     from utils.env_manager import load_mutable_settings, apply_to_runtime
@@ -454,9 +459,11 @@ async def main():
     dp.include_router(duckdns_router)
     dp.include_router(env_router)
     dp.include_router(help_router)
+    dp.include_router(pydeploy_router)
 
     sentinel = ResiliencyWatchdogEngine(bot, runtime_settings.ALLOWED_USER_ID)
     asyncio.create_task(sentinel.initialize_sentinel_loop())
+    asyncio.create_task(pydeploy_service.supervisor_loop(bot, runtime_settings.ALLOWED_USER_ID))
 
     logging.info("Starting safe long-polling system link sequences with Telegram APIs...")
     try:

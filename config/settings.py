@@ -18,6 +18,14 @@ class Settings(BaseSettings):
     DUCKDNS_DOMAIN: str | None = None
     DUCKDNS_UPDATE_INTERVAL: int = 300
     GIT_SCAN_PATHS: str | None = None
+    # /deploy clones directly onto the WSL host via SSH (like /host does) so that
+    # docker/compose bind-mount paths resolve correctly against the real host
+    # daemon. Root folder for those clones — defaults to the SSH user's home
+    # directory (same place /host's `git clone` would land) if left unset.
+    DEPLOY_HOST_ROOT: str | None = None
+    # Python app deployments (/pydeploy, /pyps) — root folder on the WSL host,
+    # relative to the SSH user's home directory unless it starts with "/"
+    PY_DEPLOY_ROOT: str = "py_deployments"
     CF_TUNNEL_TOKEN: str | None = None   # Cloudflare named tunnel token for permanent URLs
     # Host SSH settings
     HOST_SSH_USER: str | None = None

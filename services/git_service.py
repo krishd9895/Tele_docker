@@ -87,6 +87,106 @@ class GitDeploymentEngine:
         analysis["project_name"] = path_parts[-1] if subfolder_path else repo_name
         return analysis
 
+    # ── Host-native deploy pipeline (used by /deploy) ──────────────────────────
+    #
+    # process_deployment() above clones into the bot's OWN container filesystem
+    # (data/workspaces). That path only exists inside this container — the
+    # host's real Docker daemon (reached through the shared docker.sock) can't
+    # see it, so any bind mount referencing it (e.g. "./.env:/app/.env" in the
+    # cloned repo's compose file) fails with a "not a directory" mount error.
+    # This variant clones/pulls directly on the WSL host over SSH instead,
+    # matching how /host's `git clone` already works correctly.
+
+    async def _get_host_home(self) -> str:
+        code, out = await asyncio.to_thread(_ssh_exec, "echo $HOME")
+        if code == 0 and out.strip():
+            return out.strip().splitlines()[-1].strip()
+        return "/root"
+
+    async def process_deployment_host(self, repo_url: str, update_msg_callback, token: str = None) -> dict:
+        subfolder_path = ""
+        path_parts = []
+        repo_name = repo_url.rstrip("/").split("/")[-1].replace(".git", "")
+
+        if "/tree/" in repo_url:
+            parts = repo_url.split("/tree/")
+            base_url = parts[0]
+            path_parts = parts[1].split("/")
+            subfolder_path = "/".join(path_parts[1:])
+            repo_url = f"{base_url}.git"
+            repo_name = base_url.rstrip("/").split("/")[-1].replace(".git", "")
+
+        if token:
+            if "github.com" in repo_url:
+                clean_url = repo_url.replace("https://", "").replace("git://", "")
+                repo_url = f"https://{token}@{clean_url}"
+        else:
+            if repo_url.startswith("https://github.com/"):
+                clean_url = repo_url.replace("https://", "")
+                repo_url = f"https://nobody@{clean_url}"
+
+        from config.settings import runtime_settings
+        deploy_root = (runtime_settings.DEPLOY_HOST_ROOT or "").strip()
+        if deploy_root:
+            root = deploy_root.rstrip("/")
+        else:
+            root = (await self._get_host_home()).rstrip("/")
+        target_path = f"{root}/{repo_name}"
+
+        code, out = await asyncio.to_thread(
+            _ssh_exec, f'test -d "{target_path}/.git" && echo __EXISTS__ || echo __MISSING__'
+        )
+        exists = "__EXISTS__" in out
+
+        if exists:
+            await update_msg_callback("🔄 Step 1/4: Target path occupied on host. Syncing repository...")
+            code, out = await asyncio.to_thread(
+                _ssh_exec, f'cd "{target_path}" && GIT_TERMINAL_PROMPT=0 git pull 2>&1'
+            )
+            if code != 0:
+                await update_msg_callback("⚠️ Pull failed — wiping and re-cloning on host...")
+                await asyncio.to_thread(_ssh_exec, f'rm -rf "{target_path}"')
+                exists = False
+
+        if not exists:
+            await update_msg_callback("📥 Step 1/4: Cloning remote repository onto host...")
+            code, out = await asyncio.to_thread(
+                _ssh_exec,
+                f'GIT_TERMINAL_PROMPT=0 git clone --depth 1 "{repo_url}" "{target_path}" 2>&1',
+            )
+            if code != 0:
+                raise RuntimeError(out.strip() or "git clone failed on host")
+
+        analysis_target = f"{target_path}/{subfolder_path}" if subfolder_path else target_path
+        await update_msg_callback("🔍 Step 2/4: Analyzing manifest structures on host...")
+        analysis = await self._analyze_manifests_host(analysis_target)
+        analysis["repo_path"] = analysis_target
+        analysis["project_name"] = path_parts[-1] if subfolder_path else repo_name
+        return analysis
+
+    async def _analyze_manifests_host(self, path: str) -> dict:
+        result = {"type": "Unknown", "manifest": None}
+        for comp in ["docker-compose.yml", "docker-compose.yaml", "compose.yaml", "compose.yml"]:
+            code, out = await asyncio.to_thread(_ssh_exec, f'test -f "{path}/{comp}" && echo __YES__')
+            if "__YES__" in out:
+                result["type"] = "Docker Compose"
+                result["manifest"] = comp
+                return result
+
+        code, out = await asyncio.to_thread(_ssh_exec, f'test -f "{path}/Dockerfile" && echo __YES__')
+        if "__YES__" in out:
+            result["type"] = "Dockerfile Native Project"
+            result["manifest"] = "Dockerfile"
+            _, content = await asyncio.to_thread(_ssh_exec, f'cat "{path}/Dockerfile" 2>/dev/null')
+            low = content.lower()
+            if "python" in low:
+                result["type"] += " (Python)"
+            elif "node" in low:
+                result["type"] += " (NodeJS)"
+            elif "golang" in low or "go " in low:
+                result["type"] += " (Go)"
+        return result
+
     async def _analyze_manifests(self, path: Path) -> dict:
         if not path.exists():
             return {"type": "Unknown", "manifest": None}

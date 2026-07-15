@@ -89,6 +89,40 @@ class DockerOrchestrationEngine:
                 raise ex
             raise RuntimeError(f"Orchestration sequence exception crashed: {ex}")
 
+    async def build_and_run_dockerfile_on_host(
+        self,
+        project_path: str,
+        image_tag: str,
+        host_port: int,
+        container_port: int,
+        container_name: str = None,
+    ) -> tuple[bool, str]:
+        """
+        Build a plain-Dockerfile (non-compose) project and run it, entirely on
+        the WSL host via SSH. Used by /deploy so the build context and any
+        bind mounts resolve against the real host filesystem instead of the
+        bot's own container path.
+        """
+        if not container_name:
+            container_name = image_tag.split(":")[0].replace("/", "_")
+
+        build_cmd = f'cd "{project_path}" && docker build -t "{image_tag}" . 2>&1'
+        code, out = await asyncio.to_thread(_ssh_exec, build_cmd, 600)
+        if code != 0:
+            return False, out.strip() or "Docker build failed on host."
+
+        # Clear out any previous container with the same name so redeploys don't collide.
+        await asyncio.to_thread(_ssh_exec, f'docker rm -f "{container_name}" >/dev/null 2>&1; true', 30)
+
+        run_cmd = (
+            f'docker run -d --name "{container_name}" '
+            f'-p {host_port}:{container_port} --restart unless-stopped "{image_tag}" 2>&1'
+        )
+        code, out = await asyncio.to_thread(_ssh_exec, run_cmd, 60)
+        if code != 0:
+            return False, out.strip() or "Docker run failed on host."
+        return True, out.strip() or f"Container {container_name} started on host."
+
     async def list_compose_projects(self, workspace_root: str = "data/workspaces") -> list[dict]:
         """
         Scan for compose projects from two sources:
