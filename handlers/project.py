@@ -26,7 +26,10 @@ async def cmd_deploy(message: Message, state: FSMContext):
 
     async def deployment_task(token: str = None):
         try:
-            analysis = await git_engine.process_deployment(repo_url, status_msg.edit_text, token=token)
+            # Clone/pull directly on the WSL host (like /host does) so the
+            # build context and any bind mounts resolve against the real host
+            # filesystem instead of this bot's own container path.
+            analysis = await git_engine.process_deployment_host(repo_url, status_msg.edit_text, token=token)
             project_name = analysis["project_name"]
             project_type = analysis["type"]
             repo_path = analysis["repo_path"]
@@ -37,33 +40,42 @@ async def cmd_deploy(message: Message, state: FSMContext):
                     f"📋 <b>Multi-Container Compose Stack Detected</b>\n\n"
                     f"<b>Project:</b> {project_name}\n"
                     f"<b>Manifest:</b> {manifest_file}\n\n"
-                    f"🔄 <i>Step 3/4: Compiling image arrays and bringing services up...</i>",
+                    f"🔄 <i>Step 3/4: Compiling image arrays and bringing services up on host...</i>",
                     parse_mode="HTML"
                 )
-                success = await docker_engine.deploy_compose_sandbox(repo_path, manifest_name=manifest_file)
+                success, out = await docker_engine.compose_build(repo_path, manifest_name=manifest_file)
+                if success:
+                    success, out = await docker_engine.compose_up(repo_path, manifest_name=manifest_file)
             else:
                 await status_msg.edit_text(
                     f"📋 <b>Dockerfile Blueprint Detected</b>\n\n"
                     f"<b>Project:</b> {project_name}\n\n"
-                    f"🔄 <i>Step 3/4: Running docker build and starting container...</i>",
+                    f"🔄 <i>Step 3/4: Running docker build and starting container on host...</i>",
                     parse_mode="HTML"
                 )
-                success = await docker_engine.deploy_sandbox_verify(
-                    image_tag=f"{project_name.lower()}:latest", 
-                    target_port=80, 
-                    host_port=8080
+                success, out = await docker_engine.build_and_run_dockerfile_on_host(
+                    project_path=repo_path,
+                    image_tag=f"{project_name.lower()}:latest",
+                    host_port=8080,
+                    container_port=80,
                 )
 
             if success:
                 await status_msg.edit_text(
                     f"✅ <b>Deployment Successful</b>\n\n"
                     f"<b>Project Workspace:</b> <code>{project_name}</code>\n"
+                    f"<b>Location:</b> <code>{repo_path}</code>\n"
                     f"<b>Infrastructure Class:</b> {project_type}\n"
                     f"<b>Status:</b> 🟢 Active / Running in Background",
                     parse_mode="HTML"
                 )
             else:
-                await status_msg.edit_text("❌ <b>Deployment Failed:</b> Docker engine dropped out unexpectedly.")
+                import html as _html
+                await status_msg.edit_text(
+                    f"❌ <b>Deployment Failed:</b> Docker engine dropped out unexpectedly.\n\n"
+                    f"<code>{_html.escape(out.strip()[:3000])}</code>",
+                    parse_mode="HTML"
+                )
         
         except Exception as err:
             err_str = str(err)
@@ -104,23 +116,38 @@ async def capture_github_token(message: Message, state: FSMContext):
     
     async def private_deployment_task():
         try:
-            analysis = await git_engine.process_deployment(repo_url, lambda text: message.answer(text), token=token)
+            analysis = await git_engine.process_deployment_host(repo_url, lambda text: message.answer(text), token=token)
             project_name = analysis["project_name"]
             project_type = analysis["type"]
             repo_path = analysis["repo_path"]
             manifest_file = analysis.get("manifest") or "compose.yaml"
             
-            await message.answer(f"⚙️ Running authenticated build for <b>{project_name}</b>...", parse_mode="HTML")
+            await message.answer(f"⚙️ Running authenticated build for <b>{project_name}</b> on host...", parse_mode="HTML")
             
             if "Docker Compose" in project_type:
-                success = await docker_engine.deploy_compose_sandbox(repo_path, manifest_name=manifest_file)
+                success, out = await docker_engine.compose_build(repo_path, manifest_name=manifest_file)
+                if success:
+                    success, out = await docker_engine.compose_up(repo_path, manifest_name=manifest_file)
             else:
-                success = await docker_engine.deploy_sandbox_verify(f"{project_name.lower()}:latest", 80, 8080)
+                success, out = await docker_engine.build_and_run_dockerfile_on_host(
+                    project_path=repo_path,
+                    image_tag=f"{project_name.lower()}:latest",
+                    host_port=8080,
+                    container_port=80,
+                )
             
             if success:
-                await message.answer(f"✅ <b>Private Deployment Successful!</b>\nProject <code>{project_name}</code> is now running.", parse_mode="HTML")
+                await message.answer(
+                    f"✅ <b>Private Deployment Successful!</b>\nProject <code>{project_name}</code> is now running at "
+                    f"<code>{repo_path}</code>.",
+                    parse_mode="HTML"
+                )
             else:
-                await message.answer("❌ <b>Private Deployment Failed:</b> Initialization dropped out.")
+                import html as _html
+                await message.answer(
+                    f"❌ <b>Private Deployment Failed:</b>\n\n<code>{_html.escape(out.strip()[:3000])}</code>",
+                    parse_mode="HTML"
+                )
         except Exception as err:
             await message.answer(f"❌ <b>Operation Aborted due to Engine Error:</b>\n\n<code>{str(err)}</code>", parse_mode="HTML")
         finally:
