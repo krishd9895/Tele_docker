@@ -19,7 +19,8 @@ async def cmd_welcome_menu(message: Message):
         "• /2fa_status - Show session time remaining\n"
         "• /lock - Revoke current 2FA session\n\n"
         "<b>Core Docker Controls:</b>\n"
-        "• /docker_ps - List running containers\n"
+        "• /docker_ps - List containers, grouped by status\n"
+        "• /docker_images - List images, grouped by usage\n"
         "• /docker_logs <code>&lt;name&gt;</code> - View container logs\n"
         "• /docker_restart <code>&lt;name&gt;</code> - Restart a container\n"
         "• /docker_stop <code>&lt;name&gt;</code> - Stop a container\n\n"
@@ -57,20 +58,128 @@ async def cmd_welcome_menu(message: Message):
     await delete_command(message)
     await delete_after(reply, delay=60)
 
+# Ordered so the most "actionable" states surface first, with a fallback
+# bucket for any status Docker reports that isn't explicitly listed here.
+_CONTAINER_STATUS_GROUPS = [
+    ("running", "🟢 Running"),
+    ("restarting", "🔁 Restarting"),
+    ("paused", "🟡 Paused"),
+    ("created", "⚪ Created"),
+    ("exited", "🔴 Exited"),
+    ("dead", "⚫ Dead"),
+    ("removing", "🗑 Removing"),
+]
+
+
+def _group_containers_by_status(containers: list) -> str:
+    """Group containers by their live status into labeled sections."""
+    buckets: dict[str, list] = {}
+    for c in containers:
+        buckets.setdefault(c.status, []).append(c)
+
+    lines = []
+    seen_statuses = set()
+
+    def render_bucket(label: str, items: list):
+        lines.append(f"<b>{label} ({len(items)})</b>")
+        for c in items:
+            tag = c.image.tags[0] if c.image.tags else "Untagged"
+            lines.append(f"• <code>{c.name}</code> | {tag} | <code>{c.status}</code>")
+        lines.append("")
+
+    for status_key, label in _CONTAINER_STATUS_GROUPS:
+        items = buckets.get(status_key)
+        if items:
+            render_bucket(label, items)
+            seen_statuses.add(status_key)
+
+    # Anything Docker reports that we didn't explicitly account for above
+    for status_key, items in buckets.items():
+        if status_key not in seen_statuses:
+            render_bucket(f"❔ {status_key.title()}", items)
+
+    return "\n".join(lines).rstrip()
+
+
 @docker_router.message(Command("docker_ps"))
 async def cmd_docker_ps(message: Message):
     await delete_command(message)
     status_msg = await message.answer("🔄 Compiling system matrix state variables...")
     try:
-        containers = await docker_engine.get_running_containers()
+        containers = await docker_engine.get_all_containers()
         if not containers:
-            await status_msg.edit_text("ℹ️ No actively operating container clusters observed running globally.")
+            await status_msg.edit_text("ℹ️ No container clusters observed on this engine.")
             await delete_after(status_msg, delay=15)
             return
-        response = "<b>📦 Active Container Footprints:</b>\n\n"
-        for c in containers:
-            tag = c.image.tags[0] if c.image.tags else 'Untagged'
-            response += f"• <code>{c.name}</code> | {tag} | 🟢 <code>{c.status}</code>\n"
+
+        grouped = _group_containers_by_status(containers)
+        response = f"<b>📦 Container Footprints ({len(containers)} total):</b>\n\n{grouped}"
+        await status_msg.edit_text(response, parse_mode="HTML")
+        await delete_after(status_msg, delay=30)
+    except Exception as err:
+        await status_msg.edit_text(f"❌ Structural exception: {str(err)}")
+        await delete_after(status_msg, delay=20)
+
+
+def _format_bytes(n: int) -> str:
+    size = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
+@docker_router.message(Command("docker_images"))
+async def cmd_docker_images(message: Message):
+    await delete_command(message)
+    status_msg = await message.answer("🔄 Compiling image registry state...")
+    try:
+        images, containers = await asyncio.gather(
+            docker_engine.get_all_images(),
+            docker_engine.get_all_containers(),
+        )
+        if not images:
+            await status_msg.edit_text("ℹ️ No images present on this engine.")
+            await delete_after(status_msg, delay=15)
+            return
+
+        # Group images by whether some container (running or not) currently
+        # references them — that's the operational split that matters for
+        # deciding whether an image is safe to prune.
+        in_use_ids = {c.image.id for c in containers}
+
+        in_use, unused, dangling = [], [], []
+        for img in images:
+            if not img.tags:
+                dangling.append(img)
+            elif img.id in in_use_ids:
+                in_use.append(img)
+            else:
+                unused.append(img)
+
+        def render_group(label: str, items: list) -> list[str]:
+            out = [f"<b>{label} ({len(items)})</b>"]
+            for img in items:
+                tags = ", ".join(img.tags) if img.tags else "&lt;none&gt;:&lt;none&gt;"
+                size = _format_bytes(img.attrs.get("Size", 0))
+                short_id = img.short_id.replace("sha256:", "")
+                out.append(f"• <code>{tags}</code> | {short_id} | {size}")
+            out.append("")
+            return out
+
+        lines: list[str] = []
+        if in_use:
+            lines += render_group("📌 In Use", in_use)
+        if unused:
+            lines += render_group("📦 Unused (tagged, no container)", unused)
+        if dangling:
+            lines += render_group("🗑 Dangling (untagged)", dangling)
+
+        body = "\n".join(lines).rstrip()
+        response = f"<b>🖼️ Images ({len(images)} total):</b>\n\n{body}"
+        if len(response) > 4000:
+            response = response[:4000] + "\n\n<i>… truncated</i>"
         await status_msg.edit_text(response, parse_mode="HTML")
         await delete_after(status_msg, delay=30)
     except Exception as err:
@@ -482,10 +591,13 @@ async def _do_docker_build(message: Message, repo_path: str):
     from utils.ssh_helper import get_ssh_creds
     user, _ = get_ssh_creds()
     path_not_in_container = not __import__('pathlib').Path(repo_path).exists()
-    is_self_restart = path_not_in_container  # host paths always go via SSH
 
-    # Check if this is our own TeleDocker repo (so we can only restart tg-manager-bot)
+    # Check if this is our own TeleDocker repo (so we can only restart tg-manager-bot).
+    # This is the ONLY case where the bot's own process is at risk of being killed
+    # mid-command — every other project (even ones that live on the host and are
+    # therefore driven over SSH) is safe to just await normally.
     is_teledocker_repo = project_name == "Tele_docker" or project_name == "Tele_docker-main"
+    is_self_restart = is_teledocker_repo
 
     if is_self_restart:
         # Auto-detect manifest on host first
@@ -511,28 +623,67 @@ async def _do_docker_build(message: Message, repo_path: str):
             f"✅ git pull\n"
             f"✅ docker compose build\n"
             f"🔄 docker compose up -d  ← <i>restarting now via host SSH...</i>\n\n"
-            f"<i>The bot may go offline briefly. It will reconnect automatically.</i>",
+            f"<i>This process will be killed by its own restart, so I can't wait on it "
+            f"directly. A follow-up message confirming whether tg-manager-bot actually "
+            f"came back up will arrive in a few seconds.</i>",
             parse_mode="HTML"
         )
         # Small delay to ensure message is delivered before the bot dies
         await asyncio.sleep(2)
-        # Fire-and-forget — run directly via SSH without waiting
+
+        # This process (tg-manager-bot) is about to be killed by the very command
+        # we're issuing below, so anything we try to read back from the SSH channel
+        # in-process is unreliable — the channel dies with the container. Instead,
+        # build a single self-contained host-side script that:
+        #   1. runs the restart,
+        #   2. waits for the new container to come up,
+        #   3. checks its actual running/health state via `docker inspect`,
+        #   4. reports the real result straight to Telegram via curl (bypassing
+        #      this process entirely).
+        # It's launched fully detached (nohup + setsid) so it keeps running even
+        # if the SSH session/container is torn down mid-flight.
         from utils.ssh_helper import ssh_exec
-        if is_teledocker_repo:
-            # For our own repo: only restart tg-manager-bot, leave rescue bot running!
-            cmd = f'cd "{repo_path}" && docker compose -f "{manifest_name}" up -d --no-deps tg-manager-bot 2>&1'
-        else:
-            cmd = f'cd "{repo_path}" && docker compose -f "{manifest_name}" up -d 2>&1'
-        # Run in a separate thread without waiting for the result
+        from config.settings import runtime_settings
+        bot_token = runtime_settings.TELEGRAM_BOT_TOKEN
+        chat_id = runtime_settings.ALLOWED_USER_ID
+
+        verify_script = (
+            f'cd "{repo_path}" && '
+            f'docker compose -f "{manifest_name}" up -d --no-deps tg-manager-bot > /tmp/tdk_restart.log 2>&1; '
+            'ok=0; '
+            'for i in $(seq 1 15); do '
+            '  sleep 2; '
+            '  running=$(docker inspect -f "{{.State.Running}}" tg_manager_bot 2>/dev/null); '
+            '  if [ "$running" = "true" ]; then ok=1; break; fi; '
+            'done; '
+            'if [ "$ok" = "1" ]; then '
+            '  health=$(docker inspect -f "{{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}" tg_manager_bot 2>/dev/null); '
+            f'  text="\u2705 tg-manager-bot restarted successfully and is running (health: $health)."; '
+            'else '
+            f'  text="\u26a0\ufe0f tg-manager-bot did NOT come back up after the restart. Check with docker logs tg_manager_bot on the host. Last compose output: $(tail -c 500 /tmp/tdk_restart.log | tr -d "\\n" | head -c 500)"; '
+            'fi; '
+            f'curl -s -X POST "https://api.telegram.org/bot{bot_token}/sendMessage" '
+            f'--data-urlencode "chat_id={chat_id}" --data-urlencode "text=$text" >/dev/null 2>&1'
+        )
+        # setsid detaches the script from the SSH session so it survives even if
+        # the container (and its SSH channel) dies mid-command; nohup covers shells
+        # where job control / disown isn't available.
+        detached_cmd = f"nohup setsid sh -c '{verify_script}' > /dev/null 2>&1 < /dev/null &"
+
+        # Fire-and-forget from this process's point of view — the script above is
+        # self-sufficient and reports its own result directly to the user.
         import threading
         def _run_in_background():
             try:
-                ssh_exec(cmd, timeout=300)
+                ssh_exec(detached_cmd, timeout=10)
             except:
                 pass
         threading.Thread(target=_run_in_background, daemon=True).start()
     else:
-        # Container-local project — safe to await
+        # Any project other than the bot's own repo — safe to await, even if it
+        # lives on the host and has to be driven over SSH, since restarting some
+        # unrelated stack can't kill this process. compose_up() already knows how
+        # to route host-path projects over SSH internally.
         up_ok, up_out = await docker_engine.compose_up(repo_path)
         up_trimmed = _html.escape(up_out[-1000:] if len(up_out) > 1000 else up_out)
 

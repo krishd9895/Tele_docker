@@ -26,6 +26,15 @@ class Settings(BaseSettings):
     # Python app deployments (/pydeploy, /pyps) — root folder on the WSL host,
     # relative to the SSH user's home directory unless it starts with "/"
     PY_DEPLOY_ROOT: str = "py_deployments"
+    # One-off script runner (/runpy) — root folder on the WSL host for
+    # ephemeral run sessions (uploaded script + input files), relative to
+    # the SSH user's home directory unless it starts with "/". Each session
+    # gets its own subfolder here, deleted automatically after results are
+    # delivered.
+    PY_RUN_ROOT: str = "py_runs"
+    # Max seconds a /runpy script may run before it's forcefully killed
+    # (verified, not fire-and-forget — see utils.ssh_helper.exec_streaming).
+    PY_RUN_TIMEOUT: int = 300
     CF_TUNNEL_TOKEN: str | None = None   # Cloudflare named tunnel token for permanent URLs
     # Host SSH settings
     HOST_SSH_USER: str | None = None

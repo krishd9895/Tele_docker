@@ -25,6 +25,9 @@ class DockerOrchestrationEngine:
     async def get_all_containers(self):
         return await asyncio.to_thread(self.client.containers.list, all=True)
 
+    async def get_all_images(self):
+        return await asyncio.to_thread(self.client.images.list, all=False)
+
     async def get_system_stats(self):
         return await asyncio.to_thread(self.client.info)
 

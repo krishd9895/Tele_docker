@@ -318,6 +318,12 @@ In <code>.env</code>:
 <code>HOST_SSH_USER=Ubuntu</code>
 <code>HOST_SSH_PASSWORD=yourpass</code>
 
+<i>Note:</i> on startup the bot automatically grants itself passwordless
+sudo on the host (if that user can already sudo with a password) so that
+<code>/host sudo ...</code> and other sudo-dependent features work without
+a manual <code>visudo</code> step. You'll get a one-time notification when
+this happens.
+
 Output trimmed to 3800 chars if very long."""
         ),
         (
@@ -385,6 +391,47 @@ the host.
 Each deployment gets its own folder + virtual environment on the
 WSL host under <code>PY_DEPLOY_ROOT</code> (default
 <code>~/py_deployments</code>, configurable in <code>.env</code>)."""
+        ),
+        (
+            "runpy",
+            "🐍 Run Script",
+            """🐍 <b>Run a Python Script</b> — <code>/runpy</code>
+
+Run a Python script on your WSL host straight from your phone, exactly
+like opening a folder in PyCharm and hitting Run — no IDE needed.
+
+<b>Requires 2FA</b> — run /verify first.
+
+━━━━━━━━━━━━━━━━━━━━━━━━
+<b>How it works:</b>
+
+1. <code>/runpy</code> — the bot prepares a throwaway workspace
+2. Send your <code>.py</code> file
+3. Optionally send any input files it needs (<code>.xlsx</code>,
+   <code>.pdf</code>, <code>.csv</code>, a <code>requirements.txt</code>, etc.) —
+   one at a time, any order
+4. Tap ▶️ <b>Run</b>
+5. If you sent more than one <code>.py</code> file, pick which one is the
+   entry point
+6. Get back the console output, plus any file the script created or
+   modified (e.g. a new/updated <code>.xlsx</code>)
+
+━━━━━━━━━━━━━━━━━━━━━━━━
+<b>Under the hood:</b>
+
+• All uploaded files land in the same folder on the host, so relative
+  paths in your script (<code>open("data.xlsx")</code>) work exactly like
+  they would in a local project folder.
+• If you upload a <code>requirements.txt</code>, the bot creates a throwaway
+  virtual environment and installs it before running your script.
+• Long-running scripts are force-stopped after a timeout (default 5
+  minutes, configurable via <code>/setenv PY_RUN_TIMEOUT &lt;seconds&gt;</code>)
+  so a stuck script can't run forever.
+• After results are delivered, the entire workspace — your script, any
+  input files, and anything it produced — is <b>automatically deleted</b>
+  from the host.
+
+<b>Cancel anytime</b> with the ❌ Cancel button — cleans up immediately."""
         ),
     ]
 
