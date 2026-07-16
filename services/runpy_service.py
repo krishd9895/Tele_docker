@@ -167,32 +167,74 @@ def _diff_changed(before: dict, after: dict) -> list[str]:
     return sorted(changed)
 
 
-async def _maybe_build_venv(session_dir: str, has_requirements: bool, log: list[str]) -> str | None:
-    """If requirements.txt was uploaded, create a throwaway venv and install it. Returns the venv path, or None to fall back to system python3."""
-    if not has_requirements:
+async def _maybe_build(
+    session_dir: str,
+    build_cmd: str | None,
+    has_requirements: bool,
+    log: list[str],
+) -> str | None:
+    """
+    If the user supplied a build command OR a requirements.txt was uploaded,
+    create an isolated venv and run the appropriate install step.
+
+    Priority:
+      1. User-supplied build_cmd (e.g. "pip install requests pandas")
+      2. Auto-detected requirements.txt
+
+    Returns the venv path on success, or None to fall back to system python3.
+    """
+    if not build_cmd and not has_requirements:
         return None
+
     venv_path = f"{session_dir}/.venv"
-    log.append("Detected requirements.txt — creating an isolated virtual environment...")
+    log.append("🔧 Creating isolated virtual environment…")
     code, out = await ssh_exec_async(f'python3 -m venv {_shq(venv_path)} 2>&1', timeout=120)
     if code != 0:
         log.append(f"⚠️ Could not create venv, falling back to system python3:\n{out.strip()[-800:]}")
         return None
-    code, out = await ssh_exec_async(
-        f'{_shq(venv_path + "/bin/pip")} install --no-input --disable-pip-version-check '
-        f'-r {_shq(session_dir + "/requirements.txt")} 2>&1',
-        timeout=180,
-    )
-    if code != 0:
-        log.append(f"⚠️ pip install failed, falling back to system python3:\n{out.strip()[-1200:]}")
-        return None
-    log.append("Dependencies installed.")
+
+    venv_pip = venv_path + "/bin/pip"
+
+    if build_cmd:
+        # Map bare "pip" / "pip3" to the venv's pip so packages land in the venv.
+        cmd = build_cmd.strip()
+        if cmd.startswith("pip3 "):
+            cmd = f'{_shq(venv_pip)} {cmd[5:]}'
+        elif cmd.startswith("pip "):
+            cmd = f'{_shq(venv_pip)} {cmd[4:]}'
+        # else run the command as-is (e.g. a custom script, apt-get, etc.)
+
+        log.append(f"🔧 Running build command: {build_cmd}")
+        full_cmd = f'cd {_shq(session_dir)} && {cmd} 2>&1'
+        code, out = await ssh_exec_async(full_cmd, timeout=300)
+        if code != 0:
+            log.append(
+                f"⚠️ Build command exited with code {code} — "
+                f"falling back to system python3:\n{out.strip()[-1200:]}"
+            )
+            return None
+        log.append("✅ Build command completed.")
+    else:
+        # Auto-install requirements.txt
+        log.append("📦 Detected requirements.txt — installing dependencies…")
+        code, out = await ssh_exec_async(
+            f'{_shq(venv_pip)} install --no-input --disable-pip-version-check '
+            f'-r {_shq(session_dir + "/requirements.txt")} 2>&1',
+            timeout=300,
+        )
+        if code != 0:
+            log.append(f"⚠️ pip install failed, falling back to system python3:\n{out.strip()[-1200:]}")
+            return None
+        log.append("✅ Dependencies installed.")
+
     return venv_path
 
 
 async def run_script(
     session_dir: str,
     entry_file: str,
-    has_requirements: bool,
+    build_cmd: str | None = None,
+    has_requirements: bool = False,
 ) -> dict:
     """
     Run entry_file (relative to session_dir) with cwd=session_dir.
@@ -207,7 +249,7 @@ async def run_script(
       }
     """
     setup_log: list[str] = []
-    venv_path = await _maybe_build_venv(session_dir, has_requirements, setup_log)
+    venv_path = await _maybe_build(session_dir, build_cmd, has_requirements, setup_log)
 
     before = await _snapshot(session_dir)
 

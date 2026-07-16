@@ -8,6 +8,7 @@ handler module — it only reuses shared, already-public helpers
 other handler in this bot already does.
 """
 
+import asyncio
 import html as _html
 
 from aiogram import Router, F
@@ -37,6 +38,18 @@ pydeploy_router = Router()
 # need to re-run /pydeploy, no different from any other in-flight FSM state.
 _pending_dockerfile_choices: dict[int, dict] = {}
 
+# ── Wizard session tracking + timeout ────────────────────────────────────────
+# Stores {user_id: {"chat_id": int, "state": FSMContext}} so the background
+# timeout task can clean up FSM state even without a handler context.
+_pyd_wizard: dict[int, dict] = {}
+_pyd_timeout_tasks: dict[int, asyncio.Task] = {}
+_PYD_INACTIVITY_SEC = 120  # 2 minutes
+
+# Reusable single-button keyboard shown on every wizard prompt.
+_CANCEL_KB = InlineKeyboardMarkup(inline_keyboard=[[
+    InlineKeyboardButton(text="❌ Cancel", callback_data="pyd:wizard_cancel")
+]])
+
 _STATUS_EMOJI = {
     "running": "🟢",
     "stopped": "⚪",
@@ -59,6 +72,76 @@ def _is_owner(user_id: int) -> bool:
     return user_id == runtime_settings.ALLOWED_USER_ID
 
 
+# ── Wizard timeout helpers ────────────────────────────────────────────────────
+
+def _pyd_cancel_timeout(user_id: int):
+    task = _pyd_timeout_tasks.pop(user_id, None)
+    if task and not task.done():
+        task.cancel()
+
+
+def _pyd_schedule_timeout(user_id: int, bot):
+    """Reset the 2-min inactivity timer. Call on every wizard interaction."""
+    _pyd_cancel_timeout(user_id)
+
+    async def _waiter():
+        await asyncio.sleep(_PYD_INACTIVITY_SEC)
+        info = _pyd_wizard.pop(user_id, None)
+        if not info:
+            return
+        _pending_dockerfile_choices.pop(info.get("chat_id"), None)
+        try:
+            await info["state"].clear()
+        except Exception:
+            pass
+        try:
+            await bot.send_message(
+                info["chat_id"],
+                "⏰ <b>/pydeploy timed out</b> — no activity for 2 minutes. "
+                "Run /pydeploy again whenever you're ready.",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+
+    task = asyncio.create_task(_waiter())
+    _pyd_timeout_tasks[user_id] = task
+
+
+def _pyd_wizard_done(user_id: int, chat_id: int):
+    """Call when the wizard finishes normally (or is cancelled). Stops the timer."""
+    _pyd_cancel_timeout(user_id)
+    _pyd_wizard.pop(user_id, None)
+    _pending_dockerfile_choices.pop(chat_id, None)
+
+
+def _pyd_start_wizard(user_id: int, chat_id: int, state: FSMContext, bot):
+    """Register a wizard session and start its inactivity timer."""
+    _pyd_wizard[user_id] = {"chat_id": chat_id, "state": state}
+    _pyd_schedule_timeout(user_id, bot)
+
+
+# ── Wizard cancel callback ────────────────────────────────────────────────────
+
+@pydeploy_router.callback_query(F.data == "pyd:wizard_cancel")
+async def cb_pyd_wizard_cancel(call: CallbackQuery, state: FSMContext):
+    if not _is_owner(call.from_user.id):
+        await call.answer("Not authorized.", show_alert=True)
+        return
+    await call.answer()
+    user_id = call.from_user.id
+    _pyd_wizard_done(user_id, call.message.chat.id)
+    await state.clear()
+    try:
+        await call.message.edit_text(
+            "❌ <b>/pydeploy cancelled.</b>\nRun /pydeploy again whenever you're ready.",
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+    await delete_after(call.message, delay=8)
+
+
 # ── /pydeploy ────────────────────────────────────────────────────────────────
 
 @pydeploy_router.message(Command("pydeploy"))
@@ -69,17 +152,19 @@ async def cmd_pydeploy(message: Message, state: FSMContext):
     if len(args) < 2:
         await delete_command(message)
         await state.set_state(PyDeployStates.waiting_for_source)
-        reply = await message.answer(
+        _pyd_start_wizard(message.from_user.id, message.chat.id, state, message.bot)
+        await message.answer(
             "🐍 <b>Deploy a Python project</b>\n\n"
             "Send me either:\n"
             "• A GitHub repo URL (public, or private with a token embedded in the URL)\n"
             "• A <code>.zip</code> / <code>.rar</code> file of your project\n\n"
             "<i>Tip: you can also run</i> <code>/pydeploy &lt;url&gt; [entry_file.py]</code> <i>directly.</i>\n\n"
             "No Docker required — plain Python files, an optional "
-            "<code>requirements.txt</code>, and/or a <code>setup.py</code>/<code>pyproject.toml</code> only.",
-            parse_mode="HTML"
+            "<code>requirements.txt</code>, and/or a <code>setup.py</code>/<code>pyproject.toml</code> only.\n\n"
+            "⏰ <i>Auto-cancelled after 2 min of inactivity.</i>",
+            parse_mode="HTML",
+            reply_markup=_CANCEL_KB,
         )
-        await delete_after(reply, delay=90)
         return
 
     source = args[1].strip()
@@ -102,6 +187,7 @@ async def cmd_pydeploy(message: Message, state: FSMContext):
 
 @pydeploy_router.message(PyDeployStates.waiting_for_source, F.document)
 async def cmd_pydeploy_receive_archive(message: Message, state: FSMContext):
+    _pyd_wizard_done(message.from_user.id, message.chat.id)
     await state.clear()
     doc = message.document
     filename = doc.file_name or "upload.zip"
@@ -131,14 +217,16 @@ async def cmd_pydeploy_receive_archive(message: Message, state: FSMContext):
 
 @pydeploy_router.message(PyDeployStates.waiting_for_source, F.text)
 async def cmd_pydeploy_receive_url(message: Message, state: FSMContext):
-    await state.clear()
-    source = (message.text or "").strip()
-    if not (source.startswith("http://") or source.startswith("https://")):
-        reply = await message.answer("⚠️ That doesn't look like a URL. Run /pydeploy again to retry.", parse_mode="HTML")
+    text = (message.text or "").strip()
+    # Let the cancel callback handle "cancel" taps; this handler is for text.
+    if not (text.startswith("http://") or text.startswith("https://")):
+        reply = await message.answer("⚠️ That doesn't look like a URL. Send a valid GitHub URL or tap ❌ Cancel.", parse_mode="HTML")
         await delete_after(reply, delay=10)
         return
+    _pyd_wizard_done(message.from_user.id, message.chat.id)
+    await state.clear()
     await delete_command(message)
-    await _run_git_deploy(message, source, None)
+    await _run_git_deploy(message, text, None)
 
 
 async def _run_git_deploy(message: Message, repo_url: str, entry_override: str | None):
@@ -204,12 +292,20 @@ async def cb_pyd_dockerfile_confirm(call: CallbackQuery, state: FSMContext):
     except Exception:
         pass
 
+    user_id = call.from_user.id
+    _pyd_start_wizard(user_id, call.message.chat.id, state, call.bot)
     await state.set_state(PyDeployStates.awaiting_build_command)
     await call.message.answer(
-        "🛠️ <b>Build command</b> (optional)\n\n"
-        "Send a shell command to run before starting (e.g. <code>pip install -r requirements.txt</code>), "
-        "or send <code>skip</code> to use the default (auto-install <code>requirements.txt</code>/<code>setup.py</code>).",
-        parse_mode="HTML"
+        "🛠️ <b>Step 1 of 3 — Build command</b> (optional)\n\n"
+        "Send a shell command to run before starting, e.g.:\n"
+        "  <code>pip install -r requirements.txt</code>\n\n"
+        "Send <code>skip</code> or just press the button to use the default "
+        "(auto-install <code>requirements.txt</code> / <code>setup.py</code>).",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⏭ Skip this step", callback_data="pyd:skip_build")],
+            [InlineKeyboardButton(text="❌ Cancel", callback_data="pyd:wizard_cancel")],
+        ]),
     )
 
 
@@ -220,19 +316,56 @@ def _norm_skip(text: str) -> str | None:
     return text
 
 
+async def _send_run_cmd_prompt(target, reset_user_id: int, bot):
+    """Send the 'run command' prompt. Used by both text handler and skip callback."""
+    _pyd_schedule_timeout(reset_user_id, bot)
+    await target.answer(
+        "▶️ <b>Step 2 of 3 — Run command</b> (optional)\n\n"
+        "Send the command that starts your app, e.g.:\n"
+        "  <code>python bot.py</code>  or  <code>gunicorn app:app</code>\n\n"
+        "Send <code>skip</code> or press the button to auto-detect "
+        "(<code>main.py</code> / <code>app.py</code> / <code>bot.py</code> / etc.).",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⏭ Skip this step", callback_data="pyd:skip_run")],
+            [InlineKeyboardButton(text="❌ Cancel", callback_data="pyd:wizard_cancel")],
+        ]),
+    )
+
+
+async def _send_env_prompt(target, reset_user_id: int, bot):
+    """Send the '.env file' prompt. Used by both text handler and skip callback."""
+    _pyd_schedule_timeout(reset_user_id, bot)
+    await target.answer(
+        "🔐 <b>Step 3 of 3 — .env file</b> (optional)\n\n"
+        "Paste the full contents of your <code>.env</code> file, or send <code>skip</code> to leave it empty.\n"
+        "<i>Your message will be deleted immediately after this step for security.</i>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⏭ Skip this step", callback_data="pyd:skip_env")],
+            [InlineKeyboardButton(text="❌ Cancel", callback_data="pyd:wizard_cancel")],
+        ]),
+    )
+
+
 @pydeploy_router.message(PyDeployStates.awaiting_build_command, F.text)
 async def cmd_pyd_receive_build_command(message: Message, state: FSMContext):
     build_command = _norm_skip(message.text)
     await delete_command(message)
     await state.update_data(build_command=build_command)
     await state.set_state(PyDeployStates.awaiting_run_command)
-    await message.answer(
-        "▶️ <b>Run command</b> (optional)\n\n"
-        "Send the command that starts your app (e.g. <code>python bot.py</code> or <code>gunicorn app:app</code>), "
-        "or send <code>skip</code> to auto-detect the entry point "
-        "(<code>main.py</code>/<code>app.py</code>/<code>bot.py</code>/<code>run.py</code>/<code>server.py</code>).",
-        parse_mode="HTML"
-    )
+    await _send_run_cmd_prompt(message, message.from_user.id, message.bot)
+
+
+@pydeploy_router.callback_query(F.data == "pyd:skip_build")
+async def cb_pyd_skip_build(call: CallbackQuery, state: FSMContext):
+    if not _is_owner(call.from_user.id):
+        await call.answer("Not authorized.", show_alert=True)
+        return
+    await call.answer("Build command skipped.")
+    await state.update_data(build_command=None)
+    await state.set_state(PyDeployStates.awaiting_run_command)
+    await _send_run_cmd_prompt(call.message, call.from_user.id, call.bot)
 
 
 @pydeploy_router.message(PyDeployStates.awaiting_run_command, F.text)
@@ -241,12 +374,49 @@ async def cmd_pyd_receive_run_command(message: Message, state: FSMContext):
     await delete_command(message)
     await state.update_data(run_command=run_command)
     await state.set_state(PyDeployStates.awaiting_env_content)
-    await message.answer(
-        "🔐 <b>.env file</b> (optional)\n\n"
-        "Paste the full contents of your <code>.env</code> file, or send <code>skip</code> to leave it as-is.\n"
-        "<i>Your message will be deleted immediately after this step for security.</i>",
-        parse_mode="HTML"
+    await _send_env_prompt(message, message.from_user.id, message.bot)
+
+
+@pydeploy_router.callback_query(F.data == "pyd:skip_run")
+async def cb_pyd_skip_run(call: CallbackQuery, state: FSMContext):
+    if not _is_owner(call.from_user.id):
+        await call.answer("Not authorized.", show_alert=True)
+        return
+    await call.answer("Run command skipped.")
+    await state.update_data(run_command=None)
+    await state.set_state(PyDeployStates.awaiting_env_content)
+    await _send_env_prompt(call.message, call.from_user.id, call.bot)
+
+
+@pydeploy_router.callback_query(F.data == "pyd:skip_env")
+async def cb_pyd_skip_env(call: CallbackQuery, state: FSMContext):
+    if not _is_owner(call.from_user.id):
+        await call.answer("Not authorized.", show_alert=True)
+        return
+    await call.answer()
+    # Treat as if user typed "skip" for env — synthesise the env-content flow
+    user_id = call.from_user.id
+    chat_id = call.message.chat.id
+    pending = _pending_dockerfile_choices.get(chat_id)
+    data = await state.get_data()
+    _pyd_wizard_done(user_id, chat_id)
+    await state.clear()
+    if not pending:
+        await call.message.answer("⚠️ Deployment prompt expired. Please run /pydeploy again.")
+        return
+    status = await call.message.answer("🚀 <b>Continuing deployment as a plain Python app...</b>", parse_mode="HTML")
+    async def _update(text: str):
+        try:
+            await status.edit_text(text, parse_mode="HTML")
+        except Exception:
+            pass
+    result = await continue_provision(
+        name=pending["name"], path=pending["path"], source_type=pending["source_type"],
+        source=pending["source"], entry_point_override=pending.get("entry_point_override"),
+        existing_id=pending.get("existing_id"), update_cb=_update,
+        build_command=data.get("build_command"), run_command=data.get("run_command"), env_content=None,
     )
+    await _report_result(chat_id, status, result)
 
 
 @pydeploy_router.message(PyDeployStates.awaiting_env_content, F.text)
@@ -254,9 +424,11 @@ async def cmd_pyd_receive_env_content(message: Message, state: FSMContext):
     env_content = _norm_skip(message.text)
     await delete_command(message)
 
+    user_id = message.from_user.id
     chat_id = message.chat.id
-    pending = _pending_dockerfile_choices.pop(chat_id, None)
+    pending = _pending_dockerfile_choices.get(chat_id)
     data = await state.get_data()
+    _pyd_wizard_done(user_id, chat_id)
     await state.clear()
 
     if not pending:
@@ -465,17 +637,21 @@ async def cb_pyd_upload_prompt(call: CallbackQuery, state: FSMContext):
 
     await state.set_state(PyDeployStates.awaiting_update_archive)
     await state.update_data(update_dep_id=dep_id)
+    _pyd_start_wizard(call.from_user.id, call.message.chat.id, state, call.bot)
     await call.message.answer(
         f"📤 Send a <code>.zip</code> or <code>.rar</code> file to replace the code for "
         f"<b>{_html.escape(dep['name'])}</b>.\n\n"
         "This wipes the existing code (keeping the virtual environment, logs, and any "
-        "<code>.env</code> file) and rebuilds/restarts with the new contents.",
-        parse_mode="HTML"
+        "<code>.env</code> file) and rebuilds/restarts with the new contents.\n\n"
+        "⏰ <i>Auto-cancelled after 2 min of inactivity.</i>",
+        parse_mode="HTML",
+        reply_markup=_CANCEL_KB,
     )
 
 
 @pydeploy_router.message(PyDeployStates.awaiting_update_archive, F.document)
 async def cmd_pyd_receive_update_archive(message: Message, state: FSMContext):
+    _pyd_wizard_done(message.from_user.id, message.chat.id)
     data = await state.get_data()
     await state.clear()
     dep_id = data.get("update_dep_id")
