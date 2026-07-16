@@ -508,27 +508,20 @@ async def main():
         await bot.session.close()
 
 if __name__ == "__main__":
-    # The bot must survive at (almost) any cost: docker-compose already sets
-    # `restart: always` on the container, but that only helps once the whole
-    # Python process has died. This loop is a second, faster line of defense
-    # — if main() ever raises something that escapes the in-process error
-    # handler (e.g. a crash during startup/reconnect, before the dispatcher
-    # is even running), log it and restart main() in-place with a short
-    # backoff instead of letting the process exit and waiting on Docker.
-    _consecutive_crashes = 0
-    while True:
-        try:
-            asyncio.run(main())
-            # main() only returns normally on a clean shutdown path; treat
-            # that as intentional and stop looping.
-            break
-        except (KeyboardInterrupt, SystemExit):
-            logging.info("System gracefully exiting operational execution cycles.")
-            break
-        except Exception as e:
-            _consecutive_crashes += 1
-            logging.exception(f"Fatal error in main() (crash #{_consecutive_crashes}) — restarting bot process in-place: {e}")
-            # Back off a bit more each time so a persistent failure (e.g. bad
-            # token, unreachable Telegram) doesn't spin the CPU/log flood.
-            backoff = min(60, 5 * _consecutive_crashes)
-            time.sleep(backoff)
+    # docker-compose `restart: always` handles process-level restarts.
+    # Do NOT call main() more than once in the same process: the imported
+    # routers (auth_router, docker_router, …) are module-level singletons.
+    # aiogram attaches each router to a Dispatcher exactly once and refuses
+    # to re-attach it to a new Dispatcher — doing so raises:
+    #   RuntimeError: Router is already attached to <Dispatcher …>
+    # Retrying main() in-place would hit that error on every subsequent
+    # crash, causing an infinite crash loop instead of a clean restart.
+    # Exiting with a non-zero code lets Docker restart the container fresh.
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logging.info("System gracefully exiting operational execution cycles.")
+    except Exception as e:
+        logging.exception(f"Fatal error in main() — exiting so Docker can restart cleanly: {e}")
+        import sys
+        sys.exit(1)
