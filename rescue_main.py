@@ -255,8 +255,28 @@ async def main():
     if not token or allowed_id == 0:
         print("Rescue bot skipped: TELEGRAM_BOT_TOKEN or ALLOWED_USER_ID not set.")
         return
-    print("🚨 Rescue bot online.")
-    await dp.start_polling(bot)
+
+    # Retry loop for startup network failures (e.g. the host's internet is
+    # momentarily down when the container first comes up). Unlike the main bot,
+    # the rescue bot registers all handlers via module-level @dp decorators, so
+    # calling dp.start_polling() again after a network failure is safe — there
+    # is no router double-attach problem here.
+    attempt = 0
+    while True:
+        try:
+            attempt += 1
+            print(f"🚨 Rescue bot starting (attempt {attempt})...")
+            await dp.start_polling(bot)
+            # start_polling only returns on a clean shutdown (SIGTERM/SIGINT)
+            break
+        except (KeyboardInterrupt, SystemExit):
+            print("Rescue bot shutting down.")
+            break
+        except Exception as e:
+            backoff = min(60, 5 * attempt)
+            print(f"Rescue bot startup/polling error (attempt {attempt}): {e}")
+            print(f"Retrying in {backoff}s...")
+            await asyncio.sleep(backoff)
 
 
 if __name__ == '__main__':
